@@ -3,7 +3,7 @@ Restore product descriptions from the July 2025 SQL backup via admin form.
 Reads description + description_short for each product/language from the backup
 and submits them to the PrestaShop admin, correctly including textarea fields.
 """
-import requests, re, sys, time
+import requests, re, sys, time, html as html_mod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 sys.stdout.reconfigure(encoding='utf-8')
@@ -12,76 +12,34 @@ ADMIN   = 'https://alegro.gr/admin875fdclzkf27m3shsg9'
 PASSWD  = 'cultivatesandspreadslove13579' + chr(33)
 EMAIL   = 'damoncollective@gmail.com'
 WORKERS = 4
-BACKUP  = r'C:\Users\Damon\Desktop\ALLA\sqlqueries\1753088504-255a1d97.sql'
+BACKUP  = '/home/hrundivbachsi/alegro/descriptions_backup_20260304.json'
+
+# Already restored via dedicated scripts — skip these
+SKIP_PIDS = {21, 22, 23, 24, 63, 65, 66, 67, 68, 69, 70, 71, 72,  # Xena
+             46, 47, 48, 49, 50, 51, 52}                            # Cecilia
 
 # ── Parse backup ─────────────────────────────────────────────────────────────
-def _parse_rows(block):
-    rows = []
-    i = 0
-    while i < len(block):
-        if block[i] == '(':
-            j, depth, in_str, esc = i+1, 1, False, False
-            while j < len(block) and depth > 0:
-                c = block[j]
-                if esc: esc = False
-                elif c == '\\': esc = True
-                elif c == "'" and not esc: in_str = not in_str
-                elif not in_str:
-                    if c == '(': depth += 1
-                    elif c == ')': depth -= 1
-                j += 1
-            rows.append(block[i:j])
-            i = j
-        else:
-            i += 1
-    return rows
+import json
+print('Loading backup…')
+with open(BACKUP, encoding='utf-8') as f:
+    raw = json.load(f)
 
-def _parse_vals(row_str):
-    inner = row_str.strip().strip('()')
-    vals, i = [], 0
-    while i < len(inner):
-        while i < len(inner) and inner[i] in ' \t\n': i += 1
-        if i >= len(inner): break
-        if inner[i:i+4] == 'NULL':
-            vals.append(None); i += 4
-        elif inner[i] == "'":
-            i += 1; s = []
-            while i < len(inner):
-                c = inner[i]
-                if c == '\\' and i+1 < len(inner):
-                    nc = inner[i+1]
-                    s.append({'n':'\n','r':'\r','t':'\t','\\':'\\', "'":"'", '"':'"'}.get(nc, nc))
-                    i += 2
-                elif c == "'":
-                    i += 1; break
-                else:
-                    s.append(c); i += 1
-            vals.append(''.join(s))
-        else:
-            j = i
-            while j < len(inner) and inner[j] != ',': j += 1
-            vals.append(inner[i:j].strip()); i = j
-        while i < len(inner) and inner[i] in ' \t\n,':
-            if inner[i] == ',': i += 1; break
-            i += 1
-    return vals
-
-print('Parsing backup…')
-with open(BACKUP, encoding='utf-8', errors='replace') as f:
-    content = f.read()
-
-blocks = re.findall(r"INSERT INTO `l9n7b_product_lang` VALUES\s*\n(.*?);", content, re.S)
-
-# descs[pid][lang] = {'desc': ..., 'short': ...}
+# descs[pid][lang] = {'desc': ..., 'short': ..., 'meta_desc': ...}
+LANG_MAP = {'lang_1': '1', 'lang_2': '2'}
 descs = {}
-for block in blocks:
-    for rs in _parse_rows(block):
-        v = _parse_vals(rs)
-        if len(v) < 10: continue
-        pid, lang = v[0], v[2]
-        desc  = v[3] or ''
-        short = v[4] or ''
-        descs.setdefault(pid, {})[lang] = {'desc': desc, 'short': short}
+for pid_str, langs in raw.items():
+    pid = int(pid_str)
+    if pid in SKIP_PIDS:
+        continue
+    for lang_key, lang_id in LANG_MAP.items():
+        data = langs.get(lang_key, {})
+        desc      = data.get('description', '')
+        short     = data.get('description_short', '')
+        meta_desc = data.get('meta_description', '')
+        if desc or short or meta_desc:
+            descs.setdefault(str(pid), {})[lang_id] = {
+                'desc': desc, 'short': short, 'meta_desc': meta_desc
+            }
 
 print(f'Loaded descriptions for {len(descs)} products from backup.')
 
@@ -154,7 +112,7 @@ def restore_product(s, cat_tok, pid, lang_descs):
                    re.search(r'<option[^>]*value="([^"]*)"', body, re.I))
             all_inputs[nm.group(1)] = sel.group(1) if sel else ''
 
-        payload = {k: v for k, v in all_inputs.items() if k not in EXCLUDE}
+        payload = {k: html_mod.unescape(v) for k, v in all_inputs.items() if k not in EXCLUDE}
         payload['product[details][features][feature_id]']        = '0'
         payload['product[options][visibility][visibility]']      = 'both'
         payload['product[options][visibility][online_only]']     = '0'
@@ -164,6 +122,8 @@ def restore_product(s, cat_tok, pid, lang_descs):
         for lang, data in lang_descs.items():
             payload[f'product[description][description][{lang}]']       = data['desc']
             payload[f'product[description][description_short][{lang}]'] = data['short']
+            if data.get('meta_desc'):
+                payload[f'product[seo][meta_description][{lang}]']      = data['meta_desc']
 
         # Clean invalid chars in name fields
         for k in list(payload.keys()):

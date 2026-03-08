@@ -12,7 +12,8 @@ ADMIN   = 'https://alegro.gr/admin875fdclzkf27m3shsg9'
 PASSWD  = 'cultivatesandspreadslove13579' + chr(33)
 EMAIL   = 'damoncollective@gmail.com'
 WORKERS = 4
-OUTPUT  = fr'C:\Users\Damon\Desktop\descriptions_backup_{date.today().strftime("%Y%m%d")}.json'
+OUTPUT  = f'/home/hrundivbachsi/alegro/descriptions_backup_{date.today().strftime("%Y%m%d")}.json'
+PREV_BACKUP = '/home/hrundivbachsi/alegro/descriptions_backup_20260304.json'
 
 print_lock = Lock()
 def log(msg):
@@ -90,11 +91,10 @@ def fetch_product(s, cat_tok, pid):
 log('Logging in…')
 s0, cat0 = make_session()
 
-r_list = s0.get(f'{ADMIN}/index.php/sell/catalog/products/',
-                params={'_token': cat0, 'products[limit]': 1000},
-                allow_redirects=True)
-pids = sorted(set(int(p) for p in re.findall(r'/sell/catalog/products/(\d+)/edit', r_list.text)))
-log(f'Found {len(pids)} products. Fetching with {WORKERS} workers…\n')
+with open(PREV_BACKUP, encoding='utf-8') as _f:
+    _prev = json.load(_f)
+pids = sorted(int(k) for k in _prev.keys())
+log(f'Loaded {len(pids)} product IDs from previous backup. Fetching with {WORKERS} workers…\n')
 
 sessions = [make_session() for _ in range(WORKERS)]
 results  = {}

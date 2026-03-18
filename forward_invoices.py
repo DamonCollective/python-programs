@@ -30,7 +30,7 @@ ACCOUNTS = [
     },
     {
         "email":      "wigscoop@gmail.com",
-        "creds_file": "credentials_wigscoop.json",
+        "creds_file": "credentials_damoncollective.json",
         "token_file": "token_wigscoop.json",
     },
 ]
@@ -56,6 +56,26 @@ INVOICE_KEYWORDS = [
 EXCLUDE_SENDERS = [
     "alegro.gr", "damoncoop.eu", "claireswigs.com",
     "damoncollective@gmail.com", "wigscoop@gmail.com",
+    "paypal.com",
+]
+
+# Subjects containing these words indicate outgoing payments or non-invoices — skip
+EXCLUDE_SUBJECT_KEYWORDS = [
+    "saldo", "bonifico", "your invoice to", "paid for your invoice",
+    "we sent your invoice", "reminder from",
+]
+
+# Only keep emails that have at least one real file attachment (PDF, doc, etc.)
+REQUIRE_ATTACHMENT = True
+
+# Attachment MIME types to skip (promo images, etc.)
+EXCLUDE_ATTACHMENT_MIMES = {"image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp", "image/tiff"}
+# Attachment extensions to skip
+EXCLUDE_ATTACHMENT_EXTS  = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif"}
+
+# Senders exempt from the attachment requirement (body will be included as text)
+ATTACHMENT_EXEMPT_SENDERS = [
+    "payments-noreply@google.com",
 ]
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -86,21 +106,41 @@ def get_service(account: dict):
     return build("gmail", "v1", credentials=creds)
 
 
-def last_month_range():
-    today            = datetime.date.today()
-    first_this_month = today.replace(day=1)
-    last_month_end   = first_this_month - datetime.timedelta(days=1)
-    last_month_start = last_month_end.replace(day=1)
+def ask_month_range():
+    today = datetime.date.today()
+    print(f"\nΓια ποιον μήνα θέλετε τιμολόγια;")
+    print(f"  Πατήστε Enter για τον προηγούμενο μήνα, ή πληκτρολογήστε MM/YYYY (π.χ. 02/2026):")
+    val = input("  Μήνας: ").strip()
+    if not val:
+        first_this_month = today.replace(day=1)
+        last_month_end   = first_this_month - datetime.timedelta(days=1)
+        month_start      = last_month_end.replace(day=1)
+        month_end        = first_this_month
+    else:
+        try:
+            parts       = val.split("/")
+            month       = int(parts[0])
+            year        = int(parts[1])
+            month_start = datetime.date(year, month, 1)
+            if month == 12:
+                month_end = datetime.date(year + 1, 1, 1)
+            else:
+                month_end = datetime.date(year, month + 1, 1)
+        except (ValueError, IndexError):
+            print("Μη έγκυρη μορφή. Χρησιμοποιώ τον προηγούμενο μήνα.")
+            first_this_month = today.replace(day=1)
+            last_month_end   = first_this_month - datetime.timedelta(days=1)
+            month_start      = last_month_end.replace(day=1)
+            month_end        = first_this_month
     return (
-        last_month_start.strftime("%Y/%m/%d"),
-        first_this_month.strftime("%Y/%m/%d"),
+        month_start.strftime("%Y/%m/%d"),
+        month_end.strftime("%Y/%m/%d"),
     )
 
 
-def build_query():
-    after, before = last_month_range()
-    keyword_part  = " OR ".join(f'"{kw}"' for kw in INVOICE_KEYWORDS)
-    exclude_part  = " ".join(f"-from:{d}" for d in EXCLUDE_SENDERS)
+def build_query(after, before):
+    keyword_part = " OR ".join(f'"{kw}"' for kw in INVOICE_KEYWORDS)
+    exclude_part = " ".join(f"-from:{d}" for d in EXCLUDE_SENDERS)
     return f"after:{after} before:{before} ({keyword_part}) {exclude_part}"
 
 
@@ -127,15 +167,19 @@ def get_attachments_and_body(service, msg):
             mime     = part.get("mimeType", "")
             filename = part.get("filename", "")
             if filename:
-                att_id = part["body"].get("attachmentId")
-                if att_id:
-                    att  = service.users().messages().attachments().get(
-                        userId="me", messageId=msg["id"], id=att_id
-                    ).execute()
-                    data = base64.urlsafe_b64decode(att["data"])
+                ext = os.path.splitext(filename.lower())[1]
+                if mime in EXCLUDE_ATTACHMENT_MIMES or ext in EXCLUDE_ATTACHMENT_EXTS:
+                    pass  # skip promo images
                 else:
-                    data = decode_part(part)
-                attachments.append((filename, data))
+                    att_id = part["body"].get("attachmentId")
+                    if att_id:
+                        att  = service.users().messages().attachments().get(
+                            userId="me", messageId=msg["id"], id=att_id
+                        ).execute()
+                        data = base64.urlsafe_b64decode(att["data"])
+                    else:
+                        data = decode_part(part)
+                    attachments.append((filename, data))
             elif mime == "text/plain" and not body_text:
                 body_text = decode_part(part).decode("utf-8", errors="ignore")
             if "parts" in part:
@@ -149,11 +193,35 @@ def get_attachments_and_body(service, msg):
     return attachments, body_text
 
 
+def has_real_attachment(msg):
+    """Return True if the message has at least one document attachment (not an image)."""
+    payload = msg.get("payload", {})
+    def walk(parts):
+        for part in parts:
+            filename = part.get("filename", "")
+            mime     = part.get("mimeType", "")
+            if filename and not mime.startswith("text/"):
+                ext = os.path.splitext(filename.lower())[1]
+                if mime not in EXCLUDE_ATTACHMENT_MIMES and ext not in EXCLUDE_ATTACHMENT_EXTS:
+                    return True
+            if "parts" in part and walk(part["parts"]):
+                return True
+        return False
+    return walk(payload.get("parts", []))
+
+
 def is_invoice_email(msg):
     headers  = msg["payload"].get("headers", [])
     subject  = extract_header(headers, "subject").lower()
     snippet  = msg.get("snippet", "").lower()
     combined = subject + " " + snippet
+
+    if any(kw in subject for kw in EXCLUDE_SUBJECT_KEYWORDS):
+        return False
+    if REQUIRE_ATTACHMENT and not has_real_attachment(msg):
+        sender = extract_header(headers, "from").lower()
+        if not any(ex in sender for ex in ATTACHMENT_EXEMPT_SENDERS):
+            return False
     return any(kw in combined for kw in INVOICE_KEYWORDS)
 
 
@@ -201,8 +269,8 @@ def main():
         print("Δεν δόθηκε email. Έξοδος.")
         return
 
-    query         = build_query()
-    after, before = last_month_range()
+    after, before = ask_month_range()
+    query         = build_query(after, before)
     print(f"\nΑναζήτηση ({after} → {before})...")
 
     all_invoices = []

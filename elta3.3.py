@@ -35,6 +35,11 @@ EU_COUNTRIES = {
     "Slovenia", "Spain", "Sweden",
 }
 
+# Country name mapping: Etsy names → ELTA weblabeling dropdown names
+COUNTRY_NAME_MAP = {
+    "United Kingdom": "Great Britain",
+}
+
 CUSTOMER_DB_PATH = os.path.expanduser("~/Documents/ELTA_NEW_PROGRAM/customer_db.json")
 
 def load_customer_db():
@@ -140,6 +145,7 @@ def load_orders_from_html(filepath):
             'length_cm':    '21',
             'width_cm':     '28',
             'height_cm':    '12',
+            'customs_qty':  '2',
         })
 
     print(f"✓ Loaded {len(records)} orders from {os.path.basename(filepath)}")
@@ -274,10 +280,11 @@ class EltaShippingApp:
 
         # Editable defaults (weight/dimensions)
         self.default_values = {
-            "weight_kg": "0,49",
-            "length_cm": "21",
-            "width_cm":  "28",
-            "height_cm": "12"
+            "weight_kg":   "0,49",
+            "length_cm":   "21",
+            "width_cm":    "28",
+            "height_cm":   "12",
+            "customs_qty": "2"
         }
 
         # Sender's email for ELTA login (fixed)
@@ -540,8 +547,9 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com"):
         # --- HANDLE COUNTRY SELECTION ---
         print("Selecting country...")
         
-        # Get country from first record
+        # Get country from first record (translate name if needed)
         country = shipping_records[0].get('ship_country', 'United States')
+        country = COUNTRY_NAME_MAP.get(country, country)
         
         # Find the country Select2 dropdown
         try:
@@ -832,11 +840,18 @@ def process_all_records(shipping_records, driver):
 
         # Fill content description (on the same wizard page as receiver)
         # Skipped automatically for EU countries — no customs form
-        fill_content_description(driver, country=record.get('ship_country', ''))
+        country = record.get('ship_country', '')
+        fill_content_description(driver, country=country)
 
-        # Click Next — may land on summary/review page first
+        # Click Next: EU → print step directly; non-EU → customs step
         find_and_click_next_button(driver)
         human_delay(1, 2)
+
+        # For non-EU: fill the Τελωνειακή Δήλωση page, then click Next again
+        if country not in EU_COUNTRIES:
+            fill_customs_declaration(driver, record)
+            find_and_click_next_button(driver)
+            human_delay(1, 2)
 
         # If there is another Next button (summary step), click it too
         try:
@@ -872,6 +887,7 @@ def process_all_records(shipping_records, driver):
 
 def select_country_and_service(driver, country="United States"):
     """Select country and service type"""
+    country = COUNTRY_NAME_MAP.get(country, country)
     # --- HANDLE COUNTRY SELECTION ---
     print("Selecting country...")
     
@@ -1061,30 +1077,14 @@ def fill_receiver_form(driver, receiver_data, weight_data, dimensions_data):
         fill_by_id(driver, "VoucherDetailWidth",  dimensions_data.get("width", "28"))
         fill_by_id(driver, "VoucherDetailHeight", dimensions_data.get("height", "12"))
         
-        # Find and tick the "Gift" checkbox — debug dump to discover its ID
+        # Tick the "Δώρο" (Gift) checkbox
         try:
-            all_checkboxes = driver.find_elements(By.XPATH, "//input[@type='checkbox']")
-            print(f"Checkboxes on page: {[(c.get_attribute('id'), c.get_attribute('name')) for c in all_checkboxes]}")
-            # Try by JS: find any checkbox whose nearby label mentions Gift/Δώρο
-            clicked = driver.execute_script("""
-                var inputs = document.querySelectorAll('input[type="checkbox"]');
-                for (var i = 0; i < inputs.length; i++) {
-                    var id = inputs[i].id;
-                    var label = document.querySelector('label[for="' + id + '"]');
-                    if (!label) label = inputs[i].closest('label');
-                    if (label && (label.textContent.includes('Δώρο') || label.textContent.toLowerCase().includes('gift'))) {
-                        if (!inputs[i].checked) inputs[i].click();
-                        return label.textContent.trim();
-                    }
-                }
-                return null;
-            """)
-            if clicked:
-                print(f"✓ Checked gift checkbox (label: {clicked!r})")
-            else:
-                print("⚠ Gift checkbox not found — will fix once ID is known")
+            gift_cb = driver.find_element(By.ID, "VoucherDetailGift")
+            if not gift_cb.is_selected():
+                driver.execute_script("arguments[0].click();", gift_cb)
+            print("✓ Checked gift checkbox (VoucherDetailGift)")
         except Exception as e:
-            print(f"Error checking gift checkbox: {e}")
+            print(f"⚠ Could not check gift checkbox: {e}")
         
         print("✓ Completed receiver data form")
 
@@ -1135,6 +1135,30 @@ def fill_content_description(driver, country=''):
         print(f"Error filling content description: {str(e)}")
         safe_screenshot(driver, "content_form_error.png")
         wait_for_user("Please fill in the content description manually, then click OK.")
+
+def fill_customs_declaration(driver, record):
+    """Fill the Τελωνειακή Δήλωση step (non-EU countries only)."""
+    print("Filling customs declaration form...")
+    try:
+        WebDriverWait(driver, 15).until(
+            EC.visibility_of_element_located((By.ID, "CustomsDeclarationDetailedDescriptionOfContents1"))
+        )
+        qty    = record.get('customs_qty', '2')
+        weight = record.get('weight_kg', '0,49')
+
+        fill_by_id(driver, "CustomsDeclarationDetailedDescriptionOfContents1", "Carnival Wigs")
+        fill_by_id(driver, "CustomsDeclarationQuantity1",                       qty)
+        fill_by_id(driver, "CustomsDeclarationNetWeight1",                       weight)
+        fill_by_id(driver, "CustomsDeclarationValue1",                           "15")
+        fill_by_id(driver, "CustomsDeclarationHSTarifNumber1",                   "9505900014")
+        fill_by_id(driver, "CustomsDeclarationCounryOfOrigionOfGoods1",          "GR")
+
+        print("✓ Customs declaration filled")
+    except Exception as e:
+        print(f"Error filling customs form: {e}")
+        safe_screenshot(driver, "customs_form_error.png")
+        wait_for_user("Please fill in the customs declaration manually, then click OK.")
+
 
 OUTPUT_DIR = os.path.expanduser("~/Documents/ELTA_NEW_PROGRAM")
 

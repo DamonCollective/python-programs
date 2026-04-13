@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Forward last month's foreign supplier invoices to accountant.
-Searches both damoncollective@gmail.com and wigscoop@gmail.com.
-Sends the bundled result from damoncollective@gmail.com.
+Automated (non-interactive) version of forward_invoices.py.
+Runs on the 10th of each month via cron.
+Searches last month's foreign supplier invoices and sends to TO_EMAIL.
 """
 
 import os
+import sys
 import base64
 import datetime
+import logging
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email.mime.text import MIMEText
@@ -15,133 +17,107 @@ from email import encoders
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
 
-# Accounts to SEARCH. Each needs its own credentials file (from Google Cloud).
-# Token files are created automatically on first login.
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 ACCOUNTS = [
     {
         "email":      "damoncollective@gmail.com",
-        "creds_file": "credentials_damoncollective.json",
-        "token_file": "token_damoncollective.json",
+        "creds_file": os.path.join(SCRIPT_DIR, "credentials_damoncollective.json"),
+        "token_file": os.path.join(SCRIPT_DIR, "token_damoncollective.json"),
     },
     {
         "email":      "wigscoop@gmail.com",
-        "creds_file": "credentials_damoncollective.json",
-        "token_file": "token_wigscoop.json",
+        "creds_file": os.path.join(SCRIPT_DIR, "credentials_damoncollective.json"),
+        "token_file": os.path.join(SCRIPT_DIR, "token_wigscoop.json"),
     },
 ]
 
-# The account that SENDS the final email (index into ACCOUNTS above)
 SENDING_ACCOUNT_INDEX = 0
 
-# From field — works only if info@damoncoop.eu is a "Send As" alias in
-# damoncollective@gmail.com (Gmail Settings → Accounts → Send mail as).
-# Otherwise Gmail sends from damoncollective@gmail.com regardless.
-SENDER  = "info@damoncoop.eu"
-CC      = "info@damoncoop.eu"
-SUBJECT = "Τιμολογια εξωτερικου"
-SCOPES  = ["https://www.googleapis.com/auth/gmail.modify"]
+SENDER   = "info@damoncoop.eu"
+CC       = "info@damoncoop.eu"
+TO_EMAIL = "costaspapapa@gmail.com"
+SCOPES   = ["https://www.googleapis.com/auth/gmail.modify"]
 
-# Invoice detection keywords
+LOG_FILE = os.path.join(SCRIPT_DIR, "forward_invoices_auto.log")
+
 INVOICE_KEYWORDS = [
     "invoice", "factura", "fattura", "bill", "receipt",
     "payment due", "pro forma", "proforma", "statement of account",
 ]
 
-# Exclude emails from your own domains
 EXCLUDE_SENDERS = [
     "alegro.gr", "damoncoop.eu", "claireswigs.com",
     "damoncollective@gmail.com", "wigscoop@gmail.com",
     "paypal.com",
 ]
 
-# Subjects containing these words indicate outgoing payments or non-invoices — skip
 EXCLUDE_SUBJECT_KEYWORDS = [
     "saldo", "bonifico", "your invoice to", "paid for your invoice",
     "we sent your invoice", "reminder from",
 ]
 
-# Only keep emails that have at least one real file attachment (PDF, doc, etc.)
 REQUIRE_ATTACHMENT = True
 
-# Attachment MIME types to skip (promo images, etc.)
 EXCLUDE_ATTACHMENT_MIMES = {"image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp", "image/tiff"}
-# Attachment extensions to skip
 EXCLUDE_ATTACHMENT_EXTS  = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff", ".tif"}
 
-# Senders exempt from the attachment requirement (body will be included as text)
 ATTACHMENT_EXEMPT_SENDERS = [
     "payments-noreply@google.com",
 ]
+
 # ────────────────────────────────────────────────────────────────────────────
+
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)s  %(message)s",
+)
+log = logging.getLogger(__name__)
+
+
+def get_month_range():
+    """Return (after, before) for the previous calendar month."""
+    today            = datetime.date.today()
+    first_this_month = today.replace(day=1)
+    last_month_end   = first_this_month - datetime.timedelta(days=1)
+    month_start      = last_month_end.replace(day=1)
+    return (
+        month_start.strftime("%Y/%m/%d"),
+        first_this_month.strftime("%Y/%m/%d"),
+    )
+
+
+def get_subject(after):
+    """Build subject with the month name in Greek."""
+    MONTHS_GR = [
+        "", "Ιανουάριος", "Φεβρουάριος", "Μάρτιος", "Απρίλιος",
+        "Μάιος", "Ιούνιος", "Ιούλιος", "Αύγουστος",
+        "Σεπτέμβριος", "Οκτώβριος", "Νοέμβριος", "Δεκέμβριος",
+    ]
+    d = datetime.datetime.strptime(after, "%Y/%m/%d")
+    return f"Τιμολόγια εξωτερικού — {MONTHS_GR[d.month]} {d.year}"
 
 
 def get_service(account: dict):
-    """Authenticate and return Gmail API service for a given account."""
     creds = None
-    token_file = account["token_file"]
-    creds_file = account["creds_file"]
-
-    if os.path.exists(token_file):
-        creds = Credentials.from_authorized_user_file(token_file, SCOPES)
-
+    if os.path.exists(account["token_file"]):
+        creds = Credentials.from_authorized_user_file(account["token_file"], SCOPES)
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            if not os.path.exists(creds_file):
-                raise FileNotFoundError(
-                    f"Credentials file not found: {creds_file}\n"
-                    f"Download it from Google Cloud Console for {account['email']}"
-                )
-            flow = InstalledAppFlow.from_client_secrets_file(creds_file, SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open(token_file, "w") as f:
+            raise RuntimeError(
+                f"Token missing or expired for {account['email']} and no browser available. "
+                f"Run forward_invoices.py manually once to re-authenticate."
+            )
+        with open(account["token_file"], "w") as f:
             f.write(creds.to_json())
-
     return build("gmail", "v1", credentials=creds)
-
-
-def ask_month_range():
-    today = datetime.date.today()
-    print(f"\nΓια ποιον μήνα θέλετε τιμολόγια;")
-    print(f"  Πατήστε Enter για τον προηγούμενο μήνα, ή πληκτρολογήστε MM/YYYY (π.χ. 02/2026):")
-    val = input("  Μήνας: ").strip()
-    if not val:
-        first_this_month = today.replace(day=1)
-        last_month_end   = first_this_month - datetime.timedelta(days=1)
-        month_start      = last_month_end.replace(day=1)
-        month_end        = first_this_month
-    else:
-        try:
-            parts       = val.split("/")
-            month       = int(parts[0])
-            year        = int(parts[1])
-            month_start = datetime.date(year, month, 1)
-            if month == 12:
-                month_end = datetime.date(year + 1, 1, 1)
-            else:
-                month_end = datetime.date(year, month + 1, 1)
-        except (ValueError, IndexError):
-            print("Μη έγκυρη μορφή. Χρησιμοποιώ τον προηγούμενο μήνα.")
-            first_this_month = today.replace(day=1)
-            last_month_end   = first_this_month - datetime.timedelta(days=1)
-            month_start      = last_month_end.replace(day=1)
-            month_end        = first_this_month
-    return (
-        month_start.strftime("%Y/%m/%d"),
-        month_end.strftime("%Y/%m/%d"),
-    )
-
-
-def build_query(after, before):
-    keyword_part = " OR ".join(f'"{kw}"' for kw in INVOICE_KEYWORDS)
-    exclude_part = " ".join(f"-from:{d}" for d in EXCLUDE_SENDERS)
-    return f"after:{after} before:{before} ({keyword_part}) {exclude_part}"
 
 
 def extract_header(headers, name):
@@ -168,9 +144,7 @@ def get_attachments_and_body(service, msg):
             filename = part.get("filename", "")
             if filename:
                 ext = os.path.splitext(filename.lower())[1]
-                if mime in EXCLUDE_ATTACHMENT_MIMES or ext in EXCLUDE_ATTACHMENT_EXTS:
-                    pass  # skip promo images
-                else:
+                if mime not in EXCLUDE_ATTACHMENT_MIMES and ext not in EXCLUDE_ATTACHMENT_EXTS:
                     att_id = part["body"].get("attachmentId")
                     if att_id:
                         att  = service.users().messages().attachments().get(
@@ -194,7 +168,6 @@ def get_attachments_and_body(service, msg):
 
 
 def has_real_attachment(msg):
-    """Return True if the message has at least one document attachment (not an image)."""
     payload = msg.get("payload", {})
     def walk(parts):
         for part in parts:
@@ -215,7 +188,6 @@ def is_invoice_email(msg):
     subject  = extract_header(headers, "subject").lower()
     snippet  = msg.get("snippet", "").lower()
     combined = subject + " " + snippet
-
     if any(kw in subject for kw in EXCLUDE_SUBJECT_KEYWORDS):
         return False
     if REQUIRE_ATTACHMENT and not has_real_attachment(msg):
@@ -225,16 +197,20 @@ def is_invoice_email(msg):
     return any(kw in combined for kw in INVOICE_KEYWORDS)
 
 
-def search_account(account: dict, query: str):
-    """Return list of invoice dicts found in this account."""
-    print(f"\n  📬 {account['email']}")
-    service = get_service(account)
+def build_query(after, before):
+    keyword_part = " OR ".join(f'"{kw}"' for kw in INVOICE_KEYWORDS)
+    exclude_part = " ".join(f"-from:{d}" for d in EXCLUDE_SENDERS)
+    return f"after:{after} before:{before} ({keyword_part}) {exclude_part}"
 
+
+def search_account(account: dict, query: str):
+    log.info(f"Searching {account['email']}...")
+    service  = get_service(account)
     results  = service.users().messages().list(
         userId="me", q=query, maxResults=100
     ).execute()
     messages = results.get("messages", [])
-    print(f"     {len(messages)} μηνύματα βρέθηκαν — φιλτράρισμα...", flush=True)
+    log.info(f"  {len(messages)} messages found, filtering...")
 
     invoices = []
     for m in messages:
@@ -255,42 +231,36 @@ def search_account(account: dict, query: str):
             "body":        body_text,
         })
 
-    print(f"     ✓ {len(invoices)} τιμολόγια αναγνωρίστηκαν")
+    log.info(f"  {len(invoices)} invoices identified")
     return invoices
 
 
 def main():
-    print("=" * 55)
-    print("  Αυτόματη αποστολή τιμολογίων εξωτερικού")
-    print("=" * 55)
+    log.info("=== forward_invoices_auto.py started ===")
 
-    to_email = input("\nΑποστολή προς (email): ").strip()
-    if not to_email:
-        print("Δεν δόθηκε email. Έξοδος.")
-        return
-
-    after, before = ask_month_range()
+    after, before = get_month_range()
+    subject       = get_subject(after)
     query         = build_query(after, before)
-    print(f"\nΑναζήτηση ({after} → {before})...")
+    log.info(f"Period: {after} → {before}")
 
     all_invoices = []
     for account in ACCOUNTS:
         try:
             found = search_account(account, query)
             all_invoices.extend(found)
-        except FileNotFoundError as e:
-            print(f"\n⚠️  {e}\n   Παράλειψη αυτού του λογαριασμού.\n")
+        except Exception as e:
+            log.error(f"Account {account['email']} failed: {e}")
 
     if not all_invoices:
-        print("\nΚανένα τιμολόγιο δεν βρέθηκε.")
+        log.info("No invoices found. Nothing sent.")
         return
 
-    # Build the outgoing email
+    # Build outgoing email
     outer_msg = MIMEMultipart()
     outer_msg["From"]    = SENDER
-    outer_msg["To"]      = to_email
+    outer_msg["To"]      = TO_EMAIL
     outer_msg["Cc"]      = CC
-    outer_msg["Subject"] = SUBJECT
+    outer_msg["Subject"] = subject
 
     summary_lines = [
         f"Τιμολόγια εξωτερικού — {after} έως {before}",
@@ -316,7 +286,6 @@ def main():
                 attachment_count += 1
             summary_lines.append(f"   Αρχεία: {', '.join(names)}")
         else:
-            # No attachment — embed body as text file
             text_part = MIMEBase("text", "plain")
             content   = f"From: {inv['from']}\nSubject: {inv['subject']}\n\n{inv['body']}"
             text_part.set_payload(content.encode("utf-8"))
@@ -331,26 +300,19 @@ def main():
 
     outer_msg.attach(MIMEText("\n".join(summary_lines), "plain", "utf-8"))
 
-    print(f"\n{'─'*55}")
-    print(f"  {len(all_invoices)} τιμολόγια | {attachment_count} αρχεία")
-    print(f"  Προς:  {to_email}")
-    print(f"  CC:    {CC}")
-    print(f"  Θέμα:  {SUBJECT}")
-    print(f"{'─'*55}")
-
-    confirm = input("\nΑποστολή; (yes/no): ").strip().lower()
-    if confirm not in ("yes", "y", "ναι", "ν"):
-        print("Ακυρώθηκε.")
-        return
-
     sending_service = get_service(ACCOUNTS[SENDING_ACCOUNT_INDEX])
     raw = base64.urlsafe_b64encode(outer_msg.as_bytes()).decode("utf-8")
     sending_service.users().messages().send(
         userId="me", body={"raw": raw}
     ).execute()
 
-    print("\n✅ Εστάλη επιτυχώς!")
+    log.info(f"Sent successfully: {len(all_invoices)} invoices, {attachment_count} attachments → {TO_EMAIL}")
+    log.info("=== done ===")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        log.exception(f"Fatal error: {e}")
+        sys.exit(1)

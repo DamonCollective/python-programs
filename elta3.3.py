@@ -53,13 +53,16 @@ def load_orders_from_html(filepath):
         first_name = parts[0] if len(parts) == 2 else full_name
         last_name  = parts[1] if len(parts) == 2 else ''
 
-        # Extract street number (digits) + any immediate suffix (e.g. A, /35, -11, /11A)
+        # Extract street number (digits) + any suffix (e.g. A, /35, -11, /11A).
         # Suffix goes as prefix before the street name per ELTA convention.
         street = addr.get('first_line', '').strip()
         # Leading number: "33A Baker St", "9/11 Baker St", "33 Baker St"
-        lead  = re.match(r'^(\d+)([^\s\d][^\s]*)?\s+(.*)', street)
-        # Trailing number: "Baker St 33A", "Baker St 9/11", "Baker St 33"
-        trail = re.match(r'^(.*\S)\s+(\d+)([^\s\d][^\s]*)?$', street)
+        lead   = re.match(r'^(\d+)([^\s\d][^\s]*)?\s+(.*)', street)
+        # Trailing number + optional immediate suffix: "Baker St 33A", "Baker St 9/11", "Baker St 33"
+        trail  = re.match(r'^(.*\S)\s+(\d+)([^\s\d][^\s]*)?$', street)
+        # Trailing number + space-separated short suffix: "Am Silberberg 33 A", "Rue Voltaire 12 Bis"
+        trail2 = re.match(r'^(.*\S)\s+(\d+)\s+([A-Za-z]{1,4})$', street)
+
         if lead:
             street_number = lead.group(1)
             suffix        = lead.group(2) or ''
@@ -70,6 +73,11 @@ def load_orders_from_html(filepath):
             street_number = trail.group(2)
             suffix        = trail.group(3) or ''
             street_name   = (suffix + ' ' + rest).strip() if suffix else rest
+        elif trail2:
+            rest          = trail2.group(1).strip()
+            street_number = trail2.group(2)
+            suffix        = trail2.group(3)
+            street_name   = (suffix + ' ' + rest).strip()
         else:
             street_number = '0'
             street_name   = street

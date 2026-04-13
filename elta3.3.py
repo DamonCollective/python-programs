@@ -848,17 +848,6 @@ def process_all_records(shipping_records, driver):
             find_and_click_next_button(driver)
             human_delay(1, 2)
 
-        # If there is another Next button (summary step), click it too
-        try:
-            extra_next = driver.find_elements(By.XPATH,
-                "//button[contains(@class,'btn-next')] | //button[contains(text(),'Επόμενο')]")
-            if extra_next and extra_next[0].is_displayed():
-                driver.execute_script("arguments[0].click();", extra_next[0])
-                print("✓ Clicked extra Next (summary step)")
-                human_delay(1, 2)
-        except Exception:
-            pass
-
         # Print the label
         print_shipping_label(driver, record)
 
@@ -1292,80 +1281,41 @@ def fill_field(driver, field_label, value):
             print(f"Alternative method also failed for {field_label}: {str(e2)}")
 
 def find_and_click_next_button(driver):
-    """Helper function to find and click the Next button using multiple approaches"""
+    """Click the currently active (visible) Επόμενο button.
+
+    The ELTA wizard is a SPA — all four btn-next buttons for all steps are
+    always in the DOM.  We must click only the one that is actually visible
+    on screen right now.
+    """
     print("Looking for the Next button...")
-    
-    # Try multiple approaches to find the Next button
-    found_button = False
-    
-    # Approach 1: Standard button search
-    try:
-        next_button = WebDriverWait(driver, 5).until(
-            EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Επόμενο')] | //input[contains(@value, 'Επόμενο')] | //a[contains(text(), 'Επόμενο')]"))
-        )
-        human_delay(0.5, 1.5)
-        next_button.click()
-        print("✓ Clicked the 'Επόμενο' (Next) button")
-        found_button = True
-        return next_button
-    except Exception as e:
-        print(f"Standard button search failed: {str(e)}")
-    
-    # Approach 2: Try to find any button that looks like a "Next" button
-    if not found_button:
-        try:
-            # Look for buttons with common next/continue related classes or attributes
-            buttons = driver.find_elements(By.XPATH, "//button[contains(@class, 'next') or contains(@class, 'continue') or contains(@class, 'submit')] | //input[@type='submit']")
-            
-            if buttons:
-                # Click the first button found
-                driver.execute_script("arguments[0].scrollIntoView(true);", buttons[0])
-                human_delay(0.5, 1)
-                buttons[0].click()
-                print(f"✓ Clicked button using alternative method (class-based)")
-                found_button = True
-                return buttons[0]
-        except Exception as e:
-            print(f"Class-based button search failed: {str(e)}")
-    
-    # Approach 3: Try using JavaScript to find and click the button
-    if not found_button:
-        try:
-            clicked = driver.execute_script("""
-                var buttons = document.getElementsByTagName('button');
-                for(var i = 0; i < buttons.length; i++) {
-                    if(buttons[i].textContent.includes('Επόμενο') || 
-                       buttons[i].id.toLowerCase().includes('next') || 
-                       buttons[i].className.toLowerCase().includes('next') ||
-                       buttons[i].className.toLowerCase().includes('continue')) {
-                        buttons[i].click();
-                        return true;
-                    }
-                }
-                
-                // Try input buttons too
-                var inputs = document.getElementsByTagName('input');
-                for(var i = 0; i < inputs.length; i++) {
-                    if(inputs[i].type === 'submit' || 
-                       inputs[i].value.includes('Επόμενο') || 
-                       inputs[i].id.toLowerCase().includes('next')) {
-                        inputs[i].click();
-                        return true;
-                    }
-                }
-                
-                return false;
-            """)
-            print("✓ Attempted to click Next button using JavaScript")
-            found_button = True
-            return True
-        except Exception as e:
-            print(f"JavaScript button search failed: {str(e)}")
-    
-    # If none of the approaches worked, ask for manual help
-    if not found_button:
-        wait_for_user("Please click the Next button manually, then click OK.")
+    human_delay(0.3, 0.6)
+
+    # JS: iterate btn-next buttons, click the first one that is visible on screen
+    data_step = driver.execute_script("""
+        var buttons = document.querySelectorAll('button.btn-next');
+        for (var i = 0; i < buttons.length; i++) {
+            var btn  = buttons[i];
+            var rect = btn.getBoundingClientRect();
+            var cs   = window.getComputedStyle(btn);
+            if (rect.width > 0 && rect.height > 0
+                    && cs.display    !== 'none'
+                    && cs.visibility !== 'hidden'
+                    && cs.opacity    !== '0') {
+                btn.click();
+                return btn.getAttribute('data-step') || 'ok';
+            }
+        }
+        return null;
+    """)
+
+    if data_step:
+        print(f"✓ Clicked visible btn-next (data-step={data_step})")
         return True
+
+    # Fallback: ask the user
+    print("⚠ Could not find a visible Next button — asking user")
+    wait_for_user("Please click the Επόμενο button manually, then click Done.")
+    return True
 
 # Main execution block
 if __name__ == "__main__":

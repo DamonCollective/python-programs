@@ -211,15 +211,15 @@ def generate_thank_you(record):
 
     # Paragraph style with font
     style = Style(name="LetterBody", family="paragraph")
-    style.addElement(ParagraphProperties(attributes={"fo:margin-bottom": "0.25cm"}))
-    style.addElement(TextProperties(attributes={"fo:font-size": "12pt", "fo:font-family": "Arial"}))
+    style.addElement(ParagraphProperties(marginbottom="0.25cm"))
+    style.addElement(TextProperties(fontsize="12pt", fontfamily="Arial"))
     doc.styles.addElement(style)
 
     def add_paragraph(text, bold=False):
         p = P(stylename="LetterBody")
         if bold:
             span_style = Style(name="Bold", family="text")
-            span_style.addElement(TextProperties(attributes={"fo:font-weight": "bold"}))
+            span_style.addElement(TextProperties(fontweight="bold"))
             doc.styles.addElement(span_style)
             p.addElement(Span(stylename="Bold", text=text))
         else:
@@ -958,8 +958,8 @@ def process_all_records(shipping_records, driver):
                 # Select country and service type for this order
                 select_country_and_service(driver, record.get('ship_country', 'United States'))
 
-                # Service → Sender (step 1)
-                find_and_click_next_button(driver, step=1)
+                # Service → Sender (step 1) — sender already filled, so silently skip if button not found
+                find_and_click_next_button(driver, step=1, quiet=True)
                 WebDriverWait(driver, 15).until(
                     EC.visibility_of_element_located((By.ID, "SenderFirstName"))
                 )
@@ -1080,9 +1080,18 @@ def select_country_and_service(driver, country="United States"):
             human_delay(0.05, 0.1)
         
         human_delay(0.5, 1)  # Wait for search results
-        
-        # Press Enter to select
-        search_input.send_keys(Keys.ENTER)
+
+        # Click the exact matching option (avoids "Spain Canary Islands" etc.)
+        try:
+            exact = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.XPATH,
+                    f"//li[contains(@class,'select2-results__option') and normalize-space(text())='{country}']"
+                ))
+            )
+            exact.click()
+        except Exception:
+            # Fall back to Enter if exact match not found
+            search_input.send_keys(Keys.ENTER)
         print(f"✓ Selected country: {country}")
         
         # Wait for the select2 dropdown to close completely
@@ -1454,7 +1463,7 @@ def fill_field(driver, field_label, value):
         except Exception as e2:
             print(f"Alternative method also failed for {field_label}: {str(e2)}")
 
-def find_and_click_next_button(driver, step=None):
+def find_and_click_next_button(driver, step=None, quiet=False):
     """Click the Επόμενο button for the given wizard step.
 
     step=None or 1 → service selection step  (no data-step attr)
@@ -1484,8 +1493,9 @@ def find_and_click_next_button(driver, step=None):
         return True
     except Exception as e:
         print(f"⚠ Could not click btn-next step={step or 1}: {e}")
-        wait_for_user("Please click the Επόμενο button manually, then click Done.")
-        return True
+        if not quiet:
+            wait_for_user("Please click the Επόμενο button manually, then click Done.")
+        return False
 
 # Main execution block
 if __name__ == "__main__":

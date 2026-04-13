@@ -13,6 +13,10 @@ import re
 import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+import requests
+from odf.opendocument import OpenDocumentText
+from odf.style import Style, TextProperties, ParagraphProperties
+from odf.text import P, Span
 
 def human_delay(min_sec=1, max_sec=3):
     """Random delay to mimic human behavior"""
@@ -58,6 +62,186 @@ def customer_db_key(record):
     if email:
         return email.lower()
     return record.get('full_name', '').strip().lower()
+
+
+# ── Country → ISO-2 code (for genderize.io country_id hint) ─────────────────
+COUNTRY_ISO = {
+    "France": "FR", "Germany": "DE", "Spain": "ES", "Italy": "IT",
+    "United Kingdom": "GB", "Great Britain": "GB", "Netherlands": "NL",
+    "Belgium": "BE", "Switzerland": "CH", "Austria": "AT", "Sweden": "SE",
+    "Norway": "NO", "Denmark": "DK", "Finland": "FI", "Poland": "PL",
+    "Portugal": "PT", "Greece": "GR", "Australia": "AU", "Canada": "CA",
+    "United States": "US", "Mexico": "MX", "Brazil": "BR", "Argentina": "AR",
+}
+
+# Countries that get Spanish letter
+SPANISH_COUNTRIES = {
+    "Spain", "Mexico", "Argentina", "Colombia", "Chile", "Peru", "Venezuela",
+    "Ecuador", "Bolivia", "Paraguay", "Uruguay", "Costa Rica", "Guatemala",
+    "Honduras", "El Salvador", "Nicaragua", "Panama", "Cuba", "Dominican Republic",
+}
+
+GENDER_CONFIDENCE_THRESHOLD = 0.85
+
+
+def guess_gender(first_name, country=None):
+    """Call genderize.io. Returns 'M', 'F', or None (ask user)."""
+    try:
+        params = {"name": first_name.split()[0]}  # use only the first given name
+        iso = COUNTRY_ISO.get(country, '')
+        if iso:
+            params["country_id"] = iso
+        resp = requests.get("https://api.genderize.io", params=params, timeout=5)
+        data = resp.json()
+        gender     = data.get("gender")        # "male", "female", or None
+        probability = data.get("probability", 0)
+        if gender and probability >= GENDER_CONFIDENCE_THRESHOLD:
+            return 'M' if gender == "male" else 'F'
+    except Exception as e:
+        print(f"⚠ genderize.io error: {e}")
+    return None  # ask user
+
+
+def ask_gender(full_name):
+    """Always-on-top dialog: ask Mr. or Ms. Returns 'M' or 'F'."""
+    result = ['M']
+    root = tk.Tk()
+    root.title("Gender?")
+    root.attributes('-topmost', True)
+    root.resizable(False, False)
+
+    tk.Label(root, text=f"Cannot determine gender for:\n{full_name}\n\nSelect salutation:",
+             wraplength=320, justify='center', pady=12, padx=16,
+             font=('Arial', 11)).pack()
+
+    btn_frame = tk.Frame(root)
+    btn_frame.pack(pady=(4, 14))
+
+    def on_mr():
+        result[0] = 'M'
+        root.destroy()
+
+    def on_ms():
+        result[0] = 'F'
+        root.destroy()
+
+    tk.Button(btn_frame, text="Mr.", command=on_mr,
+              bg='#2980b9', fg='white', font=('Arial', 11, 'bold'),
+              relief='flat', padx=20, pady=6, cursor='hand2').pack(side=tk.LEFT, padx=8)
+    tk.Button(btn_frame, text="Ms.", command=on_ms,
+              bg='#8e44ad', fg='white', font=('Arial', 11, 'bold'),
+              relief='flat', padx=20, pady=6, cursor='hand2').pack(side=tk.LEFT, padx=8)
+
+    root.update_idletasks()
+    sw = root.winfo_screenwidth(); sh = root.winfo_screenheight()
+    w = root.winfo_reqwidth();     h = root.winfo_reqheight()
+    root.geometry(f"+{(sw-w)//2}+{(sh-h)//2}")
+    root.grab_set()
+    root.mainloop()
+    return result[0]
+
+
+def generate_thank_you(record):
+    """Generate a thank-you ODT letter and save it to OUTPUT_DIR."""
+    first_name = record.get('first_name', '')
+    last_name  = record.get('last_name', '')
+    country    = record.get('ship_country', '')
+
+    # Determine gender
+    gender = guess_gender(first_name, country)
+    if gender is None:
+        gender = ask_gender(f"{first_name} {last_name}")
+
+    # Choose language and salutation
+    if country == "France":
+        if gender == 'M':
+            salutation = f"Cher M. {last_name},"
+        else:
+            salutation = f"Chère Mme. {last_name},"
+        body = (
+            "Nous tenions à exprimer notre profonde gratitude et nos sincères remerciements "
+            "d'avoir choisi notre petite manufacture comme votre destination préférée pour "
+            "l'achat de votre nouvelle perruque. Cela signifie beaucoup pour nous que vous "
+            "nous ayez confié cette décision importante.\n\n"
+            "Nous attendons avec impatience vos précieux commentaires et espérons sincèrement "
+            "que la perruque que vous avez choisie surpassera vos attentes, vous apportant une "
+            "satisfaction et une joie maximales. Cependant, nous comprenons que la perfection "
+            "est subjective, et dans le rare cas où un aspect ne correspondrait pas à votre "
+            "vision, nous vous encourageons vivement à nous en informer sans aucune hésitation. "
+            "Vos commentaires sont inestimables pour nous, car nous nous efforçons d'améliorer "
+            "continuellement nos produits et nos services.\n\n"
+            "Depuis la belle ville d'Athènes, en Grèce, nous vous adressons nos salutations "
+            "les plus chaleureuses. C'est un honneur de vous servir, et nous espérons entretenir "
+            "une relation durable avec vous.\n\nCordialement,\nConstantine"
+        )
+    elif country in SPANISH_COUNTRIES:
+        if gender == 'M':
+            salutation = f"Estimado Sr. {last_name},"
+        else:
+            salutation = f"Estimada Sra. {last_name},"
+        body = (
+            "¡Bienvenido a nuestra manufactura de pelucas! Estamos verdaderamente encantados "
+            "de que nos haya elegido para su compra. Es un honor tener la oportunidad de "
+            "contribuir a su visión creativa. Esperamos que su nueva peluca aporte el toque "
+            "perfecto a su presentación o evento.\n\n"
+            "Si desea compartir algo sobre su experiencia o hay algo que podamos hacer para "
+            "mejorarla, no dude en comunicarse con nosotros. Su opinión significa mucho para "
+            "nosotros. Muchas gracias nuevamente por confiar en nosotros. Esperamos con "
+            "entusiasmo la posibilidad de volver a colaborar en el futuro.\n\n"
+            "Cordialmente,\nConstantine"
+        )
+    else:
+        if gender == 'M':
+            salutation = f"Dear Mr. {last_name},"
+        else:
+            salutation = f"Dear Ms. {last_name},"
+        body = (
+            "Welcome to our wig manufactory! We're truly delighted that you've chosen us for "
+            "your purchase. It's an honor to have the chance to contribute to your creative "
+            "vision. We hope your new wig adds the perfect touch to your performance or event.\n\n"
+            "If there's anything you'd like to share about your experience or if there's "
+            "anything we can do to make it even better, please don't hesitate to reach out. "
+            "Your feedback means a lot to us. Thank you once again for trusting us with your "
+            "needs. We look forward to the possibility of working together again in the future.\n\n"
+            "Warm regards,\nConstantine"
+        )
+
+    # Build ODT document
+    doc = OpenDocumentText()
+
+    # Paragraph style with font
+    style = Style(name="LetterBody", family="paragraph")
+    style.addElement(ParagraphProperties(attributes={"fo:margin-bottom": "0.25cm"}))
+    style.addElement(TextProperties(attributes={"fo:font-size": "12pt", "fo:font-family": "Arial"}))
+    doc.styles.addElement(style)
+
+    def add_paragraph(text, bold=False):
+        p = P(stylename="LetterBody")
+        if bold:
+            span_style = Style(name="Bold", family="text")
+            span_style.addElement(TextProperties(attributes={"fo:font-weight": "bold"}))
+            doc.styles.addElement(span_style)
+            p.addElement(Span(stylename="Bold", text=text))
+        else:
+            p.addText(text)
+        doc.text.addElement(p)
+
+    add_paragraph(salutation, bold=True)
+    add_paragraph("")
+    for para in body.split("\n\n"):
+        for line in para.split("\n"):
+            add_paragraph(line)
+        add_paragraph("")
+
+    # Save file
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    date_str  = datetime.date.today().strftime("%d_%m_%y")
+    surname   = last_name.upper()
+    name      = first_name.upper()
+    filename  = f"{surname}_{name}_{date_str}_thankyou.odt"
+    filepath  = os.path.join(OUTPUT_DIR, filename)
+    doc.save(filepath)
+    print(f"✓ Thank-you letter saved: {filename}")
 
 
 def load_orders_from_html(filepath):
@@ -853,6 +1037,12 @@ def process_all_records(shipping_records, driver):
                 print(f"✓ Saved address for {record['full_name']} to customer DB")
         except Exception as e:
             print(f"⚠ Could not save to customer DB: {e}")
+
+        # Generate thank-you letter
+        try:
+            generate_thank_you(record)
+        except Exception as e:
+            print(f"⚠ Could not generate thank-you letter: {e}")
 
         # Wait before next record
         human_delay(2, 3)

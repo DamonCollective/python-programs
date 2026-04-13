@@ -10,6 +10,7 @@ import random
 import json
 import os
 import re
+import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
@@ -24,6 +25,35 @@ def safe_screenshot(driver, filename):
         print(f"Screenshot saved: {filename}")
     except Exception:
         pass
+
+# EU member states (no customs form required)
+EU_COUNTRIES = {
+    "Austria", "Belgium", "Bulgaria", "Croatia", "Cyprus", "Czech Republic",
+    "Denmark", "Estonia", "Finland", "France", "Germany", "Greece",
+    "Hungary", "Ireland", "Italy", "Latvia", "Lithuania", "Luxembourg",
+    "Malta", "Netherlands", "Poland", "Portugal", "Romania", "Slovakia",
+    "Slovenia", "Spain", "Sweden",
+}
+
+CUSTOMER_DB_PATH = os.path.expanduser("~/Documents/ELTA_NEW_PROGRAM/customer_db.json")
+
+def load_customer_db():
+    if os.path.exists(CUSTOMER_DB_PATH):
+        with open(CUSTOMER_DB_PATH, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+def save_customer_db(db):
+    os.makedirs(os.path.dirname(CUSTOMER_DB_PATH), exist_ok=True)
+    with open(CUSTOMER_DB_PATH, 'w', encoding='utf-8') as f:
+        json.dump(db, f, ensure_ascii=False, indent=2)
+
+def customer_db_key(record):
+    email = record.get('email', '').strip()
+    if email:
+        return email.lower()
+    return record.get('full_name', '').strip().lower()
+
 
 def load_orders_from_html(filepath):
     """Parse Etsy orders HTML file and return list of order records."""
@@ -322,6 +352,29 @@ class EltaShippingApp:
                 if skipped:
                     print(f"ℹ Skipping {skipped} USA order(s)")
 
+            # Check customer DB — offer to use stored address for known customers
+            db = load_customer_db()
+            for record in self.shipping_data:
+                key = customer_db_key(record)
+                if key and key in db:
+                    stored = db[key]
+                    addr_summary = (
+                        f"{stored.get('street_1', '')} {stored.get('street_number', '')}, "
+                        f"{stored.get('ship_zipcode', '')} {stored.get('ship_city', '')}, "
+                        f"{stored.get('ship_country', '')}"
+                    )
+                    use_stored = messagebox.askyesno(
+                        "Previous Address Found",
+                        f"Previous address found for {record['full_name']}:\n\n"
+                        f"{addr_summary}\n\nUse it?"
+                    )
+                    if use_stored:
+                        for field in ('street_1', 'street_number', 'street_2',
+                                      'ship_city', 'ship_state', 'ship_zipcode', 'ship_country'):
+                            if stored.get(field) is not None:
+                                record[field] = stored[field]
+                        print(f"✓ Using stored address for {record['full_name']}")
+
             # Data check log
             print(f"\n{'='*75}")
             print(f"LOADED {len(self.shipping_data)} ORDERS:")
@@ -583,11 +636,11 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com"):
 
         # Define sender's data (fixed values)
         sender_data = {
-            "Όνομα": "KONSTANTINOS",           # First Name
+            "Όνομα": "KOSTAS",           # First Name
             "Επώνυμο": "PAPANAYITOU",          # Last Name
-            "Όνομα Οδού": "ERASINIDOU",        # Street Name
-            "Αρ. Οδού": "58",                  # Street Number
-            "Ταχ. Κώδικας": "11632",           # Postal Code
+            "Όνομα Οδού": "ANAXIMENOUS",        # Street Name
+            "Αρ. Οδού": "18",                  # Street Number
+            "Ταχ. Κώδικας": "11631",           # Postal Code
             "Πόλη": "ATHENS"                   # City
         }
 
@@ -778,7 +831,8 @@ def process_all_records(shipping_records, driver):
         fill_receiver_form(driver, receiver_data, weight_data, dimensions_data)
 
         # Fill content description (on the same wizard page as receiver)
-        fill_content_description(driver)
+        # Skipped automatically for EU countries — no customs form
+        fill_content_description(driver, country=record.get('ship_country', ''))
 
         # Click Next — may land on summary/review page first
         find_and_click_next_button(driver)
@@ -797,6 +851,21 @@ def process_all_records(shipping_records, driver):
 
         # Print the label
         print_shipping_label(driver, record)
+
+        # Save this customer's address to the DB for future orders
+        try:
+            db = load_customer_db()
+            key = customer_db_key(record)
+            if key:
+                db[key] = {k: record.get(k, '') for k in (
+                    'full_name', 'first_name', 'last_name',
+                    'street_1', 'street_number', 'street_2',
+                    'ship_city', 'ship_state', 'ship_zipcode', 'ship_country', 'email'
+                )}
+                save_customer_db(db)
+                print(f"✓ Saved address for {record['full_name']} to customer DB")
+        except Exception as e:
+            print(f"⚠ Could not save to customer DB: {e}")
 
         # Wait before next record
         human_delay(2, 3)
@@ -1025,10 +1094,14 @@ def fill_receiver_form(driver, receiver_data, weight_data, dimensions_data):
         
         wait_for_user("Please fill in the receiver data manually, then click OK.")
 
-def fill_content_description(driver):
-    """Fill in the content description form"""
+def fill_content_description(driver, country=''):
+    """Fill in the content description form (customs). Skipped for EU countries."""
+    if country in EU_COUNTRIES:
+        print(f"ℹ Skipping content description — EU country ({country}), no customs form")
+        return
+
     print("Filling content description form...")
-    
+
     try:
         # VoucherDetailExplanation is disabled until a content type is selected.
         # Force-enable it via JS, set value and dispatch change event.
@@ -1049,12 +1122,12 @@ def fill_content_description(driver):
             if (el) {
                 el.removeAttribute('disabled');
                 el.removeAttribute('readonly');
-                el.value = '2';
+                el.value = '1';
                 el.dispatchEvent(new Event('input'));
                 el.dispatchEvent(new Event('change'));
             }
         """)
-        print("✓ Filled ProtectedVoucherDetailQuantity: 2")
+        print("✓ Filled ProtectedVoucherDetailQuantity: 1")
 
         print("✓ Completed content description form")
 
@@ -1066,7 +1139,7 @@ def fill_content_description(driver):
 OUTPUT_DIR = os.path.expanduser("~/Documents/ELTA_NEW_PROGRAM")
 
 def rename_latest_pdf(last_name, first_name, tracking_number):
-    """Move and rename the most recently downloaded PDF to OUTPUT_DIR/SURNAME_LL123456789GR.pdf"""
+    """Move and rename the most recently downloaded PDF to OUTPUT_DIR/SURNAME_NAME_DD_MM_YY.pdf"""
     try:
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         downloads_dir = os.path.expanduser("~/Downloads")
@@ -1080,8 +1153,9 @@ def rename_latest_pdf(last_name, first_name, tracking_number):
             return
         latest_pdf = max(pdf_files, key=os.path.getmtime)
         surname = last_name.upper()
-        tracking_part = f"_{tracking_number}" if tracking_number else ""
-        new_name = f"{surname}{tracking_part}.pdf"
+        name   = first_name.upper()
+        date_str = datetime.date.today().strftime("%d_%m_%y")
+        new_name = f"{surname}_{name}_{date_str}.pdf"
         new_path = os.path.join(OUTPUT_DIR, new_name)
         os.rename(latest_pdf, new_path)
         print(f"✓ PDF saved as: {new_name}  →  {OUTPUT_DIR}")

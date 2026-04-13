@@ -93,9 +93,15 @@ def get_service(account: dict):
         creds = Credentials.from_authorized_user_file(token_file, SCOPES)
 
     if not creds or not creds.valid:
+        refreshed = False
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
+            try:
+                creds.refresh(Request())
+                refreshed = True
+            except Exception:
+                pass  # token revoked — fall through to browser login
+
+        if not refreshed:
             if not os.path.exists(creds_file):
                 raise FileNotFoundError(
                     f"Credentials file not found: {creds_file}\n"
@@ -103,6 +109,7 @@ def get_service(account: dict):
                 )
             flow = InstalledAppFlow.from_client_secrets_file(creds_file, SCOPES)
             creds = flow.run_local_server(port=0)
+
         with open(token_file, "w") as f:
             f.write(creds.to_json())
 

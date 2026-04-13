@@ -634,10 +634,12 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com"):
         
         human_delay(1, 2)  # Wait for any updates after delivery selection
         
-        # Click the Next/Continue button to go to the sender form
-        find_and_click_next_button(driver)
-        human_delay(2, 3)
-        print("Current URL:", driver.current_url)
+        # Click Next: service → sender
+        find_and_click_next_button(driver, step=1)
+        WebDriverWait(driver, 15).until(
+            EC.visibility_of_element_located((By.ID, "SenderFirstName"))
+        )
+        print("✓ Sender step active")
         
         # --- HANDLE SENDER DATA FORM ---
         print("Filling sender data form...")
@@ -725,23 +727,12 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com"):
             
             wait_for_user("Please fill in the sender data manually, then click OK.")
 
-        # Click the Next/Continue button to go to the receiver form
-        try:
-            # Use the helper function to find and click the Next button
-            next_button = find_and_click_next_button(driver)
-            
-            # Wait for page to change
-            current_url = driver.current_url
-            WebDriverWait(driver, 10).until(
-                lambda d: d.current_url != current_url or len(d.find_elements(By.XPATH, "//div[contains(@class, 'load') or contains(@class, 'progress')]")) == 0
-            )
-            print("✓ Page updated after clicking Next")
-            print("Current URL:", driver.current_url)
-        except Exception as e:
-            print(f"Could not click Next button: {str(e)}")
-            safe_screenshot(driver, "next_button_error.png")
-            
-            wait_for_user("Please click the Next button manually, then click OK.")
+        # Click Next: sender → receiver, then wait for receiver step
+        find_and_click_next_button(driver, step=2)
+        WebDriverWait(driver, 15).until(
+            EC.visibility_of_element_located((By.ID, "RecipientFirstName"))
+        )
+        print("✓ Receiver step active")
         
         # Process each shipping record
         process_all_records(shipping_records, driver)
@@ -783,16 +774,13 @@ def process_all_records(shipping_records, driver):
                 # Select country and service type for this order
                 select_country_and_service(driver, record.get('ship_country', 'United States'))
 
-                # Click Next — sender data is remembered from the session, skip filling it
-                find_and_click_next_button(driver)
-
-                # Click Next again to skip the pre-filled sender step
-                WebDriverWait(driver, 10).until(
+                # Service → Sender (step 1)
+                find_and_click_next_button(driver, step=1)
+                WebDriverWait(driver, 15).until(
                     EC.visibility_of_element_located((By.ID, "SenderFirstName"))
                 )
-                find_and_click_next_button(driver)
-
-                # Wait for receiver step
+                # Sender already filled — just click Next to skip it (step 2)
+                find_and_click_next_button(driver, step=2)
                 WebDriverWait(driver, 15).until(
                     EC.visibility_of_element_located((By.ID, "RecipientFirstName"))
                 )
@@ -838,14 +826,14 @@ def process_all_records(shipping_records, driver):
         country = record.get('ship_country', '')
         fill_content_description(driver, country=country)
 
-        # Click Next: EU → print step directly; non-EU → customs step
-        find_and_click_next_button(driver)
+        # Click Next: receiver → customs (non-EU) or print (EU)
+        find_and_click_next_button(driver, step=3)
         human_delay(1, 2)
 
         # For non-EU: fill the Τελωνειακή Δήλωση page, then click Next again
         if country not in EU_COUNTRIES:
             fill_customs_declaration(driver, record)
-            find_and_click_next_button(driver)
+            find_and_click_next_button(driver, step=4)
             human_delay(1, 2)
 
         # Print the label
@@ -1276,31 +1264,36 @@ def fill_field(driver, field_label, value):
         except Exception as e2:
             print(f"Alternative method also failed for {field_label}: {str(e2)}")
 
-def find_and_click_next_button(driver):
-    """Click the currently active (visible+enabled) Επόμενο button.
+def find_and_click_next_button(driver, step=None):
+    """Click the Επόμενο button for the given wizard step.
 
-    The ELTA wizard is a SPA — all four btn-next buttons for all steps are
-    always in the DOM.  We wait up to 10 s for one that is both displayed
-    and enabled (Selenium's own checks), then JS-click it.
+    step=None or 1 → service selection step  (no data-step attr)
+    step=2         → sender step              (data-step="2")
+    step=3         → receiver step            (data-step="3")
+    step=4         → customs step             (data-step="4")
+
+    Each step has its own btn-next in the DOM; targeting by data-step
+    avoids clicking the wrong one (they are all present simultaneously).
     """
-    print("Looking for the Next button...")
-    human_delay(0.5, 1.0)
+    if step is None or step == 1:
+        selector = 'button.btn-next:not([data-step])'
+    else:
+        selector = f'button.btn-next[data-step="{step}"]'
+
+    print(f"Clicking Next button (step={step or 1})...")
+    human_delay(0.4, 0.8)
 
     try:
         btn = WebDriverWait(driver, 10).until(
-            lambda d: next(
-                (b for b in d.find_elements(By.CSS_SELECTOR, 'button.btn-next')
-                 if b.is_displayed() and b.is_enabled()),
-                None
-            )
+            EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
         )
         driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
         human_delay(0.2, 0.4)
         driver.execute_script("arguments[0].click();", btn)
-        print(f"✓ Clicked btn-next (data-step={btn.get_attribute('data-step') or 'n/a'})")
+        print(f"✓ Clicked btn-next (step={step or 1})")
         return True
     except Exception as e:
-        print(f"⚠ Could not find visible btn-next: {e}")
+        print(f"⚠ Could not click btn-next step={step or 1}: {e}")
         wait_for_user("Please click the Επόμενο button manually, then click Done.")
         return True
 

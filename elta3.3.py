@@ -780,24 +780,19 @@ def process_all_records(shipping_records, driver):
                     lambda d: "Create" in d.current_url or "New" in d.current_url or len(d.find_elements(By.XPATH, "//div[contains(@class, 'load') or contains(@class, 'progress')]")) == 0
                 )
                 
-                # Need to select country and service type again for new shipment
+                # Select country and service type for this order
                 select_country_and_service(driver, record.get('ship_country', 'United States'))
-                
-                # Click Next to go to sender form
+
+                # Click Next — sender data is remembered from the session, skip filling it
                 find_and_click_next_button(driver)
 
-                # Wait for sender fields to be visible
+                # Click Next again to skip the pre-filled sender step
                 WebDriverWait(driver, 10).until(
                     EC.visibility_of_element_located((By.ID, "SenderFirstName"))
                 )
-
-                # Fill sender form again (using the same fixed sender data)
-                fill_sender_form(driver)
-
-                # Click Next to go to receiver form
                 find_and_click_next_button(driver)
 
-                # Wait specifically for RecipientFirstName to become VISIBLE (not just present)
+                # Wait for receiver step
                 WebDriverWait(driver, 15).until(
                     EC.visibility_of_element_located((By.ID, "RecipientFirstName"))
                 )

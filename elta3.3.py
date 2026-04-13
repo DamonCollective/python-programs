@@ -1127,12 +1127,16 @@ def fill_customs_declaration(driver, record):
         WebDriverWait(driver, 15).until(
             EC.visibility_of_element_located((By.ID, "CustomsDeclarationDetailedDescriptionOfContents1"))
         )
-        qty    = record.get('customs_qty', '2')
-        weight = record.get('weight_kg', '0,49')
+        qty        = record.get('customs_qty', '2')
+        total_str  = record.get('weight_kg', '0,49')
+        # Net weight = 80% of total weight (goods only, no packaging)
+        total_kg   = float(total_str.replace(',', '.'))
+        net_kg     = round(total_kg * 0.8, 2)
+        net_weight = str(net_kg).replace('.', ',')
 
         fill_by_id(driver, "CustomsDeclarationDetailedDescriptionOfContents1", "Carnival Wigs")
         fill_by_id(driver, "CustomsDeclarationQuantity1",                       qty)
-        fill_by_id(driver, "CustomsDeclarationNetWeight1",                       weight)
+        fill_by_id(driver, "CustomsDeclarationNetWeight1",                       net_weight)
         fill_by_id(driver, "CustomsDeclarationValue1",                           "15")
         fill_by_id(driver, "CustomsDeclarationHSTarifNumber1",                   "9505900014")
         fill_by_id(driver, "CustomsDeclarationCounryOfOrigionOfGoods1",          "GR")
@@ -1178,17 +1182,13 @@ def print_shipping_label(driver, record):
     last_name  = record.get('last_name',  'UNKNOWN')
 
     try:
-        # Look for the print/download button (try multiple possible texts)
-        print_button = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.XPATH,
-                "//button[contains(text(),'Εκτύπωση') or contains(text(),'Λήψη') or contains(text(),'Print') or contains(text(),'Download')]"
-                " | //a[contains(text(),'Εκτύπωση') or contains(text(),'Λήψη')]"
-                " | //input[@type='button' and (contains(@value,'Εκτύπωση') or contains(@value,'Λήψη'))]"
-            ))
+        # The print button has a known ID — use it directly
+        print_button = WebDriverWait(driver, 15).until(
+            EC.element_to_be_clickable((By.ID, "printVoucher"))
         )
         human_delay(0.5, 1.5)
         driver.execute_script("arguments[0].click();", print_button)
-        print(f"✓ Clicked print/download button")
+        print("✓ Clicked print button (printVoucher)")
 
         # Wait for PDF to download
         human_delay(4, 6)
@@ -1203,21 +1203,17 @@ def print_shipping_label(driver, record):
             tracking_number = None
             print("⚠ Could not find tracking number on page")
 
-        # Rename the latest downloaded PDF to LastName_FirstName_tracking.pdf
+        # Rename and move the downloaded PDF
         rename_latest_pdf(last_name, first_name, tracking_number)
 
-        # Wait for user to handle print dialog / confirm PDF is saved
-        wait_for_user(
-            f"Label for {first_name} {last_name} — please save/print the PDF,\n"
-            f"then click Done to continue with the next label."
-        )
+        # Brief pause then continue — no manual confirm needed
+        human_delay(1, 2)
 
     except Exception as e:
         print(f"Error on final screen: {str(e)}")
         wait_for_user(
-            f"Cannot find the print/download button.\n"
-            f"Please click it manually for {first_name} {last_name},\n"
-            f"then click Done to continue."
+            f"Cannot find the print button for {first_name} {last_name}.\n"
+            f"Please click Εκτύπωση manually, then click Done."
         )
 
 def fill_field(driver, field_label, value):
@@ -1281,41 +1277,32 @@ def fill_field(driver, field_label, value):
             print(f"Alternative method also failed for {field_label}: {str(e2)}")
 
 def find_and_click_next_button(driver):
-    """Click the currently active (visible) Επόμενο button.
+    """Click the currently active (visible+enabled) Επόμενο button.
 
     The ELTA wizard is a SPA — all four btn-next buttons for all steps are
-    always in the DOM.  We must click only the one that is actually visible
-    on screen right now.
+    always in the DOM.  We wait up to 10 s for one that is both displayed
+    and enabled (Selenium's own checks), then JS-click it.
     """
     print("Looking for the Next button...")
-    human_delay(0.3, 0.6)
+    human_delay(0.5, 1.0)
 
-    # JS: iterate btn-next buttons, click the first one that is visible on screen
-    data_step = driver.execute_script("""
-        var buttons = document.querySelectorAll('button.btn-next');
-        for (var i = 0; i < buttons.length; i++) {
-            var btn  = buttons[i];
-            var rect = btn.getBoundingClientRect();
-            var cs   = window.getComputedStyle(btn);
-            if (rect.width > 0 && rect.height > 0
-                    && cs.display    !== 'none'
-                    && cs.visibility !== 'hidden'
-                    && cs.opacity    !== '0') {
-                btn.click();
-                return btn.getAttribute('data-step') || 'ok';
-            }
-        }
-        return null;
-    """)
-
-    if data_step:
-        print(f"✓ Clicked visible btn-next (data-step={data_step})")
+    try:
+        btn = WebDriverWait(driver, 10).until(
+            lambda d: next(
+                (b for b in d.find_elements(By.CSS_SELECTOR, 'button.btn-next')
+                 if b.is_displayed() and b.is_enabled()),
+                None
+            )
+        )
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+        human_delay(0.2, 0.4)
+        driver.execute_script("arguments[0].click();", btn)
+        print(f"✓ Clicked btn-next (data-step={btn.get_attribute('data-step') or 'n/a'})")
         return True
-
-    # Fallback: ask the user
-    print("⚠ Could not find a visible Next button — asking user")
-    wait_for_user("Please click the Επόμενο button manually, then click Done.")
-    return True
+    except Exception as e:
+        print(f"⚠ Could not find visible btn-next: {e}")
+        wait_for_user("Please click the Επόμενο button manually, then click Done.")
+        return True
 
 # Main execution block
 if __name__ == "__main__":

@@ -42,6 +42,7 @@ EU_COUNTRIES = {
 # Country name mapping: Etsy names → ELTA weblabeling dropdown names
 COUNTRY_NAME_MAP = {
     "United Kingdom": "Great Britain",
+    "Spain":          "ES Spain",
 }
 
 CUSTOMER_DB_PATH = os.path.expanduser("~/Documents/ELTA_NEW_PROGRAM/customer_db.json")
@@ -428,14 +429,59 @@ def ask_yes_no(question):
     root.mainloop()
     return result[0]
 
+def ask_mode():
+    """Ask whether to do Labels+Letters, Labels only, or Letters only.
+    Returns 'both', 'labels', or 'letters'."""
+    result = ['both']
+
+    root = tk.Tk()
+    root.title("Τι θέλετε να κάνετε;")
+    root.attributes('-topmost', True)
+    root.lift()
+    root.focus_force()
+    root.resizable(False, False)
+
+    tk.Label(root, text="Τι θέλετε να εκτελεστεί;", wraplength=380, justify='center',
+             pady=14, padx=16, font=('Arial', 12, 'bold')).pack()
+
+    btn_frame = tk.Frame(root)
+    btn_frame.pack(pady=(4, 16))
+
+    def pick(val):
+        result[0] = val
+        root.destroy()
+
+    tk.Button(btn_frame, text="Ετικέτες + Ευχαριστήρια", command=lambda: pick('both'),
+              bg='#2980b9', fg='white', font=('Arial', 11, 'bold'),
+              relief='flat', padx=14, pady=7, cursor='hand2').pack(fill='x', padx=12, pady=4)
+    tk.Button(btn_frame, text="Μόνο Ετικέτες", command=lambda: pick('labels'),
+              bg='#27ae60', fg='white', font=('Arial', 11, 'bold'),
+              relief='flat', padx=14, pady=7, cursor='hand2').pack(fill='x', padx=12, pady=4)
+    tk.Button(btn_frame, text="Μόνο Ευχαριστήρια", command=lambda: pick('letters'),
+              bg='#8e44ad', fg='white', font=('Arial', 11, 'bold'),
+              relief='flat', padx=14, pady=7, cursor='hand2').pack(fill='x', padx=12, pady=4)
+
+    root.update_idletasks()
+    w = root.winfo_reqwidth()
+    h = root.winfo_reqheight()
+    sw = root.winfo_screenwidth()
+    sh = root.winfo_screenheight()
+    root.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
+
+    root.grab_set()
+    root.mainloop()
+    return result[0]
+
+
 # Countries that ship to the USA (for filtering)
 USA_COUNTRY_VALUES = {"United States", "United States of America", "USA", "US"}
 
 class EltaShippingApp:
-    def __init__(self, root, filepath, include_usa=True):
+    def __init__(self, root, filepath, include_usa=True, mode='both'):
         self.root = root
         self.filepath = filepath
         self.include_usa = include_usa
+        self.mode = mode  # 'both' or 'labels'
         self.root.title("ELTA Shipping Label Generator")
         self.root.geometry("1000x750")
 
@@ -663,9 +709,9 @@ class EltaShippingApp:
         
         # Start the ELTA automation
         self.root.destroy()  # Close the tkinter window
-        process_elta_labels(to_process, self.sender_email)
+        process_elta_labels(to_process, self.sender_email, generate_letters=(self.mode == 'both'))
 
-def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com"):
+def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com", generate_letters=True):
     """Process ELTA label creation for the given shipping records"""
     if not shipping_records:
         print("No shipping records to process.")
@@ -1039,10 +1085,11 @@ def process_all_records(shipping_records, driver):
             print(f"⚠ Could not save to customer DB: {e}")
 
         # Generate thank-you letter
-        try:
-            generate_thank_you(record)
-        except Exception as e:
-            print(f"⚠ Could not generate thank-you letter: {e}")
+        if generate_letters:
+            try:
+                generate_thank_you(record)
+            except Exception as e:
+                print(f"⚠ Could not generate thank-you letter: {e}")
 
         # Wait before next record
         human_delay(2, 3)
@@ -1504,14 +1551,29 @@ if __name__ == "__main__":
         # 1. Pick the orders file
         filepath = ask_for_orders_file()
 
-        # 2. Ask about USA — both before main window to avoid two-Tk conflict
-        include_usa = ask_yes_no("Shall I create labels for USA orders too?")
+        # 2. Ask what to do
+        mode = ask_mode()
 
-        # 3. Open main window
-        root = tk.Tk()
-        app = EltaShippingApp(root, filepath=filepath, include_usa=include_usa)
-        root.mainloop()
-        print("Mainloop finished")
+        if mode == 'letters':
+            # Letters-only: no browser needed
+            records = load_orders_from_html(filepath)
+            # Filter out USA if desired (USA orders rarely get thank-you notes via ELTA)
+            non_usa = [r for r in records if r.get('ship_country', '') not in USA_COUNTRY_VALUES]
+            print(f"\nGenerating thank-you letters for {len(non_usa)} record(s)...")
+            for record in non_usa:
+                try:
+                    generate_thank_you(record)
+                except Exception as e:
+                    print(f"⚠ Letter failed for {record.get('full_name', '?')}: {e}")
+            print("\nDone. Letters saved to", OUTPUT_DIR)
+        else:
+            # Labels (+ optional letters)
+            include_usa = ask_yes_no("Shall I create labels for USA orders too?")
+
+            root = tk.Tk()
+            app = EltaShippingApp(root, filepath=filepath, include_usa=include_usa, mode=mode)
+            root.mainloop()
+            print("Mainloop finished")
     except Exception as e:
         print(f"Error occurred: {e}")
         import traceback

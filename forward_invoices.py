@@ -7,6 +7,7 @@ Sends the bundled result from damoncollective@gmail.com.
 
 import os
 import base64
+import calendar
 import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
@@ -106,6 +107,21 @@ def get_service(account: dict):
     return build("gmail", "v1", credentials=creds)
 
 
+def _first_of_month_plus(d, n):
+    """Return the 1st day of the month that is n months after d."""
+    m = d.month - 1 + n
+    return datetime.date(d.year + m // 12, m % 12 + 1, 1)
+
+
+def _add_months(d, n):
+    """Add n months to date d (same day clamped to month end if needed)."""
+    m = d.month - 1 + n
+    year  = d.year + m // 12
+    month = m % 12 + 1
+    day   = min(d.day, calendar.monthrange(year, month)[1])
+    return datetime.date(year, month, day)
+
+
 def ask_month_range():
     today = datetime.date.today()
     print(f"\nΓια ποιον μήνα θέλετε τιμολόγια;")
@@ -115,26 +131,29 @@ def ask_month_range():
         first_this_month = today.replace(day=1)
         last_month_end   = first_this_month - datetime.timedelta(days=1)
         month_start      = last_month_end.replace(day=1)
-        month_end        = first_this_month
     else:
         try:
             parts       = val.split("/")
-            month       = int(parts[0])
-            year        = int(parts[1])
-            month_start = datetime.date(year, month, 1)
-            if month == 12:
-                month_end = datetime.date(year + 1, 1, 1)
-            else:
-                month_end = datetime.date(year, month + 1, 1)
+            month_start = datetime.date(int(parts[1]), int(parts[0]), 1)
         except (ValueError, IndexError):
             print("Μη έγκυρη μορφή. Χρησιμοποιώ τον προηγούμενο μήνα.")
             first_this_month = today.replace(day=1)
             last_month_end   = first_this_month - datetime.timedelta(days=1)
             month_start      = last_month_end.replace(day=1)
-            month_end        = first_this_month
+
+    # Last day of the asked month
+    end_of_asked_month = _first_of_month_plus(month_start, 1) - datetime.timedelta(days=1)
+
+    # If today is within 2 months of the end of the asked month, search up to today.
+    # Otherwise cap at the end of the month following the asked month.
+    if today <= _add_months(end_of_asked_month, 2):
+        search_before = today + datetime.timedelta(days=1)   # inclusive of today
+    else:
+        search_before = _first_of_month_plus(month_start, 2) # exclusive = end of month+1
+
     return (
         month_start.strftime("%Y/%m/%d"),
-        month_end.strftime("%Y/%m/%d"),
+        search_before.strftime("%Y/%m/%d"),
     )
 
 

@@ -21,18 +21,20 @@ from googleapiclient.discovery import build
 
 # ── CONFIG ──────────────────────────────────────────────────────────────────
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # Accounts to SEARCH. Each needs its own credentials file (from Google Cloud).
 # Token files are created automatically on first login.
 ACCOUNTS = [
     {
         "email":      "damoncollective@gmail.com",
-        "creds_file": "credentials_damoncollective.json",
-        "token_file": "token_damoncollective.json",
+        "creds_file": os.path.join(SCRIPT_DIR, "credentials_damoncollective.json"),
+        "token_file": os.path.join(SCRIPT_DIR, "token_damoncollective.json"),
     },
     {
         "email":      "wigscoop@gmail.com",
-        "creds_file": "credentials_damoncollective.json",
-        "token_file": "token_wigscoop.json",
+        "creds_file": os.path.join(SCRIPT_DIR, "credentials_damoncollective.json"),
+        "token_file": os.path.join(SCRIPT_DIR, "token_wigscoop.json"),
     },
 ]
 

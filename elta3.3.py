@@ -17,6 +17,14 @@ def human_delay(min_sec=1, max_sec=3):
     """Random delay to mimic human behavior"""
     time.sleep(random.uniform(min_sec, max_sec))
 
+def safe_screenshot(driver, filename):
+    """Take a screenshot, silently skip if the browser session is dead."""
+    try:
+        driver.save_screenshot(filename)
+        print(f"Screenshot saved: {filename}")
+    except Exception:
+        pass
+
 def load_orders_from_html(filepath):
     """Parse Etsy orders HTML file and return list of order records."""
     with open(filepath, 'r', encoding='utf-8') as f:
@@ -524,8 +532,7 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com"):
             human_delay(2, 3)
         except Exception as e:
             print(f"Automated country selection failed: {str(e)}")
-            driver.save_screenshot("country_selection_failed.png")
-            print("Screenshot saved as 'country_selection_failed.png'")
+            safe_screenshot(driver, "country_selection_failed.png")
             
             wait_for_user(f"Please select '{country}' manually in the country dropdown, then click OK.")
             # Extra delay after manual interaction
@@ -561,7 +568,7 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com"):
 
         except Exception as e:
             print(f"Automated delivery type selection failed: {str(e)}")
-            driver.save_screenshot("delivery_selection_failed.png")
+            safe_screenshot(driver, "delivery_selection_failed.png")
             wait_for_user("Please select '854 LL' manually in the delivery type dropdown, then click OK.")
         
         human_delay(1, 2)  # Wait for any updates after delivery selection
@@ -653,8 +660,7 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com"):
 
         except Exception as e:
             print(f"Error filling sender form: {str(e)}")
-            driver.save_screenshot("sender_form_error.png")
-            print("Screenshot saved as 'sender_form_error.png'")
+            safe_screenshot(driver, "sender_form_error.png")
             
             wait_for_user("Please fill in the sender data manually, then click OK.")
 
@@ -672,8 +678,7 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com"):
             print("Current URL:", driver.current_url)
         except Exception as e:
             print(f"Could not click Next button: {str(e)}")
-            driver.save_screenshot("next_button_error.png")
-            print("Screenshot saved as 'next_button_error.png'")
+            safe_screenshot(driver, "next_button_error.png")
             
             wait_for_user("Please click the Next button manually, then click OK.")
         
@@ -683,8 +688,7 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com"):
     except Exception as e:
         print(f"Error occurred: {str(e)}")
         # Save screenshot for debugging
-        driver.save_screenshot("error_screenshot.png")
-        print("Screenshot saved as 'error_screenshot.png'")
+        safe_screenshot(driver, "error_screenshot.png")
 
     finally:
         # Clean up
@@ -740,8 +744,7 @@ def process_all_records(shipping_records, driver):
                 
             except Exception as e:
                 print(f"Error creating new shipment: {str(e)}")
-                driver.save_screenshot(f"new_shipment_error_{index}.png")
-                print(f"Screenshot saved as 'new_shipment_error_{index}.png'")
+                safe_screenshot(driver, f"new_shipment_error_{index}.png")
                 
                 wait_for_user("Please navigate to create a new shipment manually. When at the receiver form, click OK.")
         
@@ -845,8 +848,7 @@ def select_country_and_service(driver, country="United States"):
         human_delay(2, 3)
     except Exception as e:
         print(f"Automated country selection failed: {str(e)}")
-        driver.save_screenshot("country_selection_failed.png")
-        print("Screenshot saved as 'country_selection_failed.png'")
+        safe_screenshot(driver, "country_selection_failed.png")
         
         wait_for_user(f"Please select '{country}' manually in the country dropdown, then click OK.")
         human_delay(2, 3)
@@ -875,7 +877,7 @@ def select_country_and_service(driver, country="United States"):
             raise Exception(f"No option containing '854' found. Options: {available}")
     except Exception as e:
         print(f"Automated delivery type selection failed: {str(e)}")
-        driver.save_screenshot("delivery_selection_failed.png")
+        safe_screenshot(driver, "delivery_selection_failed.png")
         wait_for_user("Please select '854 LL' manually in the delivery type dropdown, then click OK.")
 
     human_delay(1, 2)  # Wait for any updates after delivery selection
@@ -908,8 +910,7 @@ def fill_sender_form(driver):
 
     except Exception as e:
         print(f"Error filling sender form: {str(e)}")
-        driver.save_screenshot("sender_form_error.png")
-        print("Screenshot saved as 'sender_form_error.png'")
+        safe_screenshot(driver, "sender_form_error.png")
         
         wait_for_user("Please fill in the sender data manually, then click OK.")
 
@@ -1020,8 +1021,7 @@ def fill_receiver_form(driver, receiver_data, weight_data, dimensions_data):
 
     except Exception as e:
         print(f"Error filling receiver form: {str(e)}")
-        driver.save_screenshot("receiver_form_error.png")
-        print("Screenshot saved as 'receiver_form_error.png'")
+        safe_screenshot(driver, "receiver_form_error.png")
         
         wait_for_user("Please fill in the receiver data manually, then click OK.")
 
@@ -1060,7 +1060,7 @@ def fill_content_description(driver):
 
     except Exception as e:
         print(f"Error filling content description: {str(e)}")
-        driver.save_screenshot("content_form_error.png")
+        safe_screenshot(driver, "content_form_error.png")
         wait_for_user("Please fill in the content description manually, then click OK.")
 
 OUTPUT_DIR = os.path.expanduser("~/Documents/ELTA_NEW_PROGRAM")

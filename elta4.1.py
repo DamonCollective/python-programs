@@ -717,11 +717,11 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com", ge
         print("No shipping records to process.")
         return
     
-    # Configure Firefox
+    # Configure Firefox (auto-detect on Windows/macOS; snap path on Linux)
+    import platform
     options = webdriver.FirefoxOptions()
-    options.binary_location = "/snap/firefox/current/usr/lib/firefox/firefox"
-
-    # Initialize WebDriver
+    if platform.system() == "Linux":
+        options.binary_location = "/snap/firefox/current/usr/lib/firefox/firefox"
     driver = webdriver.Firefox(options=options)
 
     try:
@@ -1022,74 +1022,84 @@ def process_all_records(shipping_records, driver):
                 
                 wait_for_user("Please navigate to create a new shipment manually. When at the receiver form, click OK.")
         
-        # --- HANDLE RECEIVER DATA FORM ---
-        print("Filling receiver data form...")
-        
-        # Define receiver data mapping from our record to ELTA form fields
-        receiver_data = {
-            "Όνομα": record.get("first_name", ""),           # First Name
-            "Επώνυμο": record.get("last_name", ""),          # Last Name
-            "Όνομα Οδού": record.get("street_1", ""),        # Street Name
-            "Αρ. Οδού": record.get("street_number", ""),     # Street Number
-            "Ταχ. Κώδικας": record.get("ship_zipcode", ""),  # Postal Code
-            "Πόλη": record.get("ship_city", ""),             # City
-            "E-Mail": record.get("email", ""),                # Buyer email from Etsy orders page
-        }
-        
-        # Fill in weight and dimensions
-        weight_data = {
-            "Βάρος (Kg)": record.get("weight_kg", "0,49")
-        }
-        
-        # Dimensions data
-        dimensions_data = {
-            "length": record.get("length_cm", "21"),
-            "width": record.get("width_cm", "28"),
-            "height": record.get("height_cm", "12")
-        }
-        
-        # Fill the receiver form (same page also has content/weight/dimensions)
-        fill_receiver_form(driver, receiver_data, weight_data, dimensions_data)
+        try:
+            # --- HANDLE RECEIVER DATA FORM ---
+            print("Filling receiver data form...")
 
-        # Fill content description (on the same wizard page as receiver)
-        # Skipped automatically for EU countries — no customs form
-        country = record.get('ship_country', '')
-        fill_content_description(driver, country=country)
+            # Define receiver data mapping from our record to ELTA form fields
+            receiver_data = {
+                "Όνομα": record.get("first_name", ""),           # First Name
+                "Επώνυμο": record.get("last_name", ""),          # Last Name
+                "Όνομα Οδού": record.get("street_1", ""),        # Street Name
+                "Αρ. Οδού": record.get("street_number", ""),     # Street Number
+                "Ταχ. Κώδικας": record.get("ship_zipcode", ""),  # Postal Code
+                "Πόλη": record.get("ship_city", ""),             # City
+                "E-Mail": record.get("email", ""),               # Buyer email from Etsy orders page
+            }
 
-        # Click Next: receiver → customs (non-EU) or print (EU)
-        find_and_click_next_button(driver, step=3)
-        human_delay(1, 2)
+            # Fill in weight and dimensions
+            weight_data = {
+                "Βάρος (Kg)": record.get("weight_kg", "0,49")
+            }
 
-        # For non-EU: fill the Τελωνειακή Δήλωση page, then click Next again
-        if country not in EU_COUNTRIES:
-            fill_customs_declaration(driver, record)
-            find_and_click_next_button(driver, step=4)
+            # Dimensions data
+            dimensions_data = {
+                "length": record.get("length_cm", "21"),
+                "width": record.get("width_cm", "28"),
+                "height": record.get("height_cm", "12")
+            }
+
+            # Fill the receiver form (same page also has content/weight/dimensions)
+            fill_receiver_form(driver, receiver_data, weight_data, dimensions_data)
+
+            # Fill content description (on the same wizard page as receiver)
+            # Skipped automatically for EU countries — no customs form
+            country = record.get('ship_country', '')
+            fill_content_description(driver, country=country)
+
+            # Click Next: receiver → customs (non-EU) or print (EU)
+            find_and_click_next_button(driver, step=3)
             human_delay(1, 2)
 
-        # Print the label
-        print_shipping_label(driver, record)
+            # For non-EU: fill the Τελωνειακή Δήλωση page, then click Next again
+            if country not in EU_COUNTRIES:
+                fill_customs_declaration(driver, record)
+                find_and_click_next_button(driver, step=4)
+                human_delay(1, 2)
 
-        # Save this customer's address to the DB for future orders
-        try:
-            db = load_customer_db()
-            key = customer_db_key(record)
-            if key:
-                db[key] = {k: record.get(k, '') for k in (
-                    'full_name', 'first_name', 'last_name',
-                    'street_1', 'street_number', 'street_2',
-                    'ship_city', 'ship_state', 'ship_zipcode', 'ship_country', 'email'
-                )}
-                save_customer_db(db)
-                print(f"✓ Saved address for {record['full_name']} to customer DB")
-        except Exception as e:
-            print(f"⚠ Could not save to customer DB: {e}")
+            # Print the label
+            print_shipping_label(driver, record)
 
-        # Generate thank-you letter
-        if generate_letters:
+            # Save this customer's address to the DB for future orders
             try:
-                generate_thank_you(record)
+                db = load_customer_db()
+                key = customer_db_key(record)
+                if key:
+                    db[key] = {k: record.get(k, '') for k in (
+                        'full_name', 'first_name', 'last_name',
+                        'street_1', 'street_number', 'street_2',
+                        'ship_city', 'ship_state', 'ship_zipcode', 'ship_country', 'email'
+                    )}
+                    save_customer_db(db)
+                    print(f"✓ Saved address for {record['full_name']} to customer DB")
             except Exception as e:
-                print(f"⚠ Could not generate thank-you letter: {e}")
+                print(f"⚠ Could not save to customer DB: {e}")
+
+            # Generate thank-you letter
+            if generate_letters:
+                try:
+                    generate_thank_you(record)
+                except Exception as e:
+                    print(f"⚠ Could not generate thank-you letter: {e}")
+
+        except Exception as e:
+            print(f"❌ Error processing record {index+1} ({record.get('full_name', '?')}): {e}")
+            safe_screenshot(driver, f"record_{index+1}_error.png")
+            wait_for_user(
+                f"Error on record {index+1}: {record.get('full_name', '?')}\n\n"
+                f"{e}\n\n"
+                f"Fix it manually in the browser, then click Done to continue to the next label."
+            )
 
         # Wait before next record
         human_delay(2, 3)

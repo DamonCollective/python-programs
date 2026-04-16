@@ -1109,7 +1109,7 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com", ge
         print("✓ Receiver step active")
         
         # Process each shipping record
-        process_all_records(shipping_records, driver)
+        process_all_records(shipping_records, driver, generate_letters)
 
     except Exception as e:
         print(f"Error occurred: {str(e)}")
@@ -1121,7 +1121,7 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com", ge
         driver.quit()
         print("Browser closed.")
 
-def process_all_records(shipping_records, driver):
+def process_all_records(shipping_records, driver, generate_letters=True):
     """Process all shipping records one by one"""
     for index, record in enumerate(shipping_records):
         print(f"\n--- Processing record {index+1} of {len(shipping_records)} ---")

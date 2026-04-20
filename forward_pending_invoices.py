@@ -59,8 +59,11 @@ def get_service(account: dict):
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
+            try:
+                creds.refresh(Request())
+            except Exception:
+                creds = None
+        if not creds or not creds.valid:
             if not os.path.exists(creds_file):
                 raise FileNotFoundError(
                     f"Credentials file not found: {creds_file}\n"
@@ -170,12 +173,13 @@ def search_for_invoice(service, account_email: str, inv: dict, search_before: st
         orig_subject = extract_header(headers, "subject")
         attachments, body_text = get_attachments_and_body(service, msg)
         found.append({
-            "account":     account_email,
-            "from":        orig_from,
-            "subject":     orig_subject,
-            "attachments": attachments,
-            "body":        body_text,
-            "invoice":     inv,
+            "account":      account_email,
+            "from":         orig_from,
+            "subject":      orig_subject,
+            "attachments":  attachments,
+            "body":         body_text,
+            "invoice":      inv,
+            "internal_date": int(msg.get("internalDate", 0)),
         })
     return found
 

@@ -13,10 +13,6 @@ import re
 import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-import requests
-from odf.opendocument import OpenDocumentText
-from odf.style import Style, TextProperties, ParagraphProperties
-from odf.text import P, Span
 
 def human_delay(min_sec=1, max_sec=3):
     """Random delay to mimic human behavior"""
@@ -42,7 +38,6 @@ EU_COUNTRIES = {
 # Country name mapping: Etsy names → ELTA weblabeling dropdown names
 COUNTRY_NAME_MAP = {
     "United Kingdom": "Great Britain",
-    "Spain":          "ES Spain",
 }
 
 CUSTOMER_DB_PATH = os.path.expanduser("~/Documents/ELTA_NEW_PROGRAM/customer_db.json")
@@ -63,186 +58,6 @@ def customer_db_key(record):
     if email:
         return email.lower()
     return record.get('full_name', '').strip().lower()
-
-
-# ── Country → ISO-2 code (for genderize.io country_id hint) ─────────────────
-COUNTRY_ISO = {
-    "France": "FR", "Germany": "DE", "Spain": "ES", "Italy": "IT",
-    "United Kingdom": "GB", "Great Britain": "GB", "Netherlands": "NL",
-    "Belgium": "BE", "Switzerland": "CH", "Austria": "AT", "Sweden": "SE",
-    "Norway": "NO", "Denmark": "DK", "Finland": "FI", "Poland": "PL",
-    "Portugal": "PT", "Greece": "GR", "Australia": "AU", "Canada": "CA",
-    "United States": "US", "Mexico": "MX", "Brazil": "BR", "Argentina": "AR",
-}
-
-# Countries that get Spanish letter
-SPANISH_COUNTRIES = {
-    "Spain", "Mexico", "Argentina", "Colombia", "Chile", "Peru", "Venezuela",
-    "Ecuador", "Bolivia", "Paraguay", "Uruguay", "Costa Rica", "Guatemala",
-    "Honduras", "El Salvador", "Nicaragua", "Panama", "Cuba", "Dominican Republic",
-}
-
-GENDER_CONFIDENCE_THRESHOLD = 0.85
-
-
-def guess_gender(first_name, country=None):
-    """Call genderize.io. Returns 'M', 'F', or None (ask user)."""
-    try:
-        params = {"name": first_name.split()[0]}  # use only the first given name
-        iso = COUNTRY_ISO.get(country, '')
-        if iso:
-            params["country_id"] = iso
-        resp = requests.get("https://api.genderize.io", params=params, timeout=5)
-        data = resp.json()
-        gender     = data.get("gender")        # "male", "female", or None
-        probability = data.get("probability", 0)
-        if gender and probability >= GENDER_CONFIDENCE_THRESHOLD:
-            return 'M' if gender == "male" else 'F'
-    except Exception as e:
-        print(f"⚠ genderize.io error: {e}")
-    return None  # ask user
-
-
-def ask_gender(full_name):
-    """Always-on-top dialog: ask Mr. or Ms. Returns 'M' or 'F'."""
-    result = ['M']
-    root = tk.Tk()
-    root.title("Gender?")
-    root.attributes('-topmost', True)
-    root.resizable(False, False)
-
-    tk.Label(root, text=f"Cannot determine gender for:\n{full_name}\n\nSelect salutation:",
-             wraplength=320, justify='center', pady=12, padx=16,
-             font=('Arial', 11)).pack()
-
-    btn_frame = tk.Frame(root)
-    btn_frame.pack(pady=(4, 14))
-
-    def on_mr():
-        result[0] = 'M'
-        root.destroy()
-
-    def on_ms():
-        result[0] = 'F'
-        root.destroy()
-
-    tk.Button(btn_frame, text="Mr.", command=on_mr,
-              bg='#2980b9', fg='white', font=('Arial', 11, 'bold'),
-              relief='flat', padx=20, pady=6, cursor='hand2').pack(side=tk.LEFT, padx=8)
-    tk.Button(btn_frame, text="Ms.", command=on_ms,
-              bg='#8e44ad', fg='white', font=('Arial', 11, 'bold'),
-              relief='flat', padx=20, pady=6, cursor='hand2').pack(side=tk.LEFT, padx=8)
-
-    root.update_idletasks()
-    sw = root.winfo_screenwidth(); sh = root.winfo_screenheight()
-    w = root.winfo_reqwidth();     h = root.winfo_reqheight()
-    root.geometry(f"+{(sw-w)//2}+{(sh-h)//2}")
-    root.grab_set()
-    root.mainloop()
-    return result[0]
-
-
-def generate_thank_you(record):
-    """Generate a thank-you ODT letter and save it to OUTPUT_DIR."""
-    first_name = record.get('first_name', '')
-    last_name  = record.get('last_name', '')
-    country    = record.get('ship_country', '')
-
-    # Determine gender
-    gender = guess_gender(first_name, country)
-    if gender is None:
-        gender = ask_gender(f"{first_name} {last_name}")
-
-    # Choose language and salutation
-    if country == "France":
-        if gender == 'M':
-            salutation = f"Cher M. {last_name},"
-        else:
-            salutation = f"Chère Mme. {last_name},"
-        body = (
-            "Nous tenions à exprimer notre profonde gratitude et nos sincères remerciements "
-            "d'avoir choisi notre petite manufacture comme votre destination préférée pour "
-            "l'achat de votre nouvelle perruque. Cela signifie beaucoup pour nous que vous "
-            "nous ayez confié cette décision importante.\n\n"
-            "Nous attendons avec impatience vos précieux commentaires et espérons sincèrement "
-            "que la perruque que vous avez choisie surpassera vos attentes, vous apportant une "
-            "satisfaction et une joie maximales. Cependant, nous comprenons que la perfection "
-            "est subjective, et dans le rare cas où un aspect ne correspondrait pas à votre "
-            "vision, nous vous encourageons vivement à nous en informer sans aucune hésitation. "
-            "Vos commentaires sont inestimables pour nous, car nous nous efforçons d'améliorer "
-            "continuellement nos produits et nos services.\n\n"
-            "Depuis la belle ville d'Athènes, en Grèce, nous vous adressons nos salutations "
-            "les plus chaleureuses. C'est un honneur de vous servir, et nous espérons entretenir "
-            "une relation durable avec vous.\n\nCordialement,\nConstantine"
-        )
-    elif country in SPANISH_COUNTRIES:
-        if gender == 'M':
-            salutation = f"Estimado Sr. {last_name},"
-        else:
-            salutation = f"Estimada Sra. {last_name},"
-        body = (
-            "¡Bienvenido a nuestra manufactura de pelucas! Estamos verdaderamente encantados "
-            "de que nos haya elegido para su compra. Es un honor tener la oportunidad de "
-            "contribuir a su visión creativa. Esperamos que su nueva peluca aporte el toque "
-            "perfecto a su presentación o evento.\n\n"
-            "Si desea compartir algo sobre su experiencia o hay algo que podamos hacer para "
-            "mejorarla, no dude en comunicarse con nosotros. Su opinión significa mucho para "
-            "nosotros. Muchas gracias nuevamente por confiar en nosotros. Esperamos con "
-            "entusiasmo la posibilidad de volver a colaborar en el futuro.\n\n"
-            "Cordialmente,\nConstantine"
-        )
-    else:
-        if gender == 'M':
-            salutation = f"Dear Mr. {last_name},"
-        else:
-            salutation = f"Dear Ms. {last_name},"
-        body = (
-            "Welcome to our wig manufactory! We're truly delighted that you've chosen us for "
-            "your purchase. It's an honor to have the chance to contribute to your creative "
-            "vision. We hope your new wig adds the perfect touch to your performance or event.\n\n"
-            "If there's anything you'd like to share about your experience or if there's "
-            "anything we can do to make it even better, please don't hesitate to reach out. "
-            "Your feedback means a lot to us. Thank you once again for trusting us with your "
-            "needs. We look forward to the possibility of working together again in the future.\n\n"
-            "Warm regards,\nConstantine"
-        )
-
-    # Build ODT document
-    doc = OpenDocumentText()
-
-    # Paragraph style with font
-    style = Style(name="LetterBody", family="paragraph")
-    style.addElement(ParagraphProperties(marginbottom="0.25cm"))
-    style.addElement(TextProperties(fontsize="12pt", fontfamily="Arial"))
-    doc.styles.addElement(style)
-
-    def add_paragraph(text, bold=False):
-        p = P(stylename="LetterBody")
-        if bold:
-            span_style = Style(name="Bold", family="text")
-            span_style.addElement(TextProperties(fontweight="bold"))
-            doc.styles.addElement(span_style)
-            p.addElement(Span(stylename="Bold", text=text))
-        else:
-            p.addText(text)
-        doc.text.addElement(p)
-
-    add_paragraph(salutation, bold=True)
-    add_paragraph("")
-    for para in body.split("\n\n"):
-        for line in para.split("\n"):
-            add_paragraph(line)
-        add_paragraph("")
-
-    # Save file
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    date_str  = datetime.date.today().strftime("%d_%m_%y")
-    surname   = last_name.upper()
-    name      = first_name.upper()
-    filename  = f"{surname}_{name}_{date_str}_thankyou.odt"
-    filepath  = os.path.join(OUTPUT_DIR, filename)
-    doc.save(filepath)
-    print(f"✓ Thank-you letter saved: {filename}")
 
 
 def load_orders_from_html(filepath):
@@ -429,59 +244,14 @@ def ask_yes_no(question):
     root.mainloop()
     return result[0]
 
-def ask_mode():
-    """Ask whether to do Labels+Letters, Labels only, or Letters only.
-    Returns 'both', 'labels', or 'letters'."""
-    result = ['both']
-
-    root = tk.Tk()
-    root.title("Τι θέλετε να κάνετε;")
-    root.attributes('-topmost', True)
-    root.lift()
-    root.focus_force()
-    root.resizable(False, False)
-
-    tk.Label(root, text="Τι θέλετε να εκτελεστεί;", wraplength=380, justify='center',
-             pady=14, padx=16, font=('Arial', 12, 'bold')).pack()
-
-    btn_frame = tk.Frame(root)
-    btn_frame.pack(pady=(4, 16))
-
-    def pick(val):
-        result[0] = val
-        root.destroy()
-
-    tk.Button(btn_frame, text="Ετικέτες + Ευχαριστήρια", command=lambda: pick('both'),
-              bg='#2980b9', fg='white', font=('Arial', 11, 'bold'),
-              relief='flat', padx=14, pady=7, cursor='hand2').pack(fill='x', padx=12, pady=4)
-    tk.Button(btn_frame, text="Μόνο Ετικέτες", command=lambda: pick('labels'),
-              bg='#27ae60', fg='white', font=('Arial', 11, 'bold'),
-              relief='flat', padx=14, pady=7, cursor='hand2').pack(fill='x', padx=12, pady=4)
-    tk.Button(btn_frame, text="Μόνο Ευχαριστήρια", command=lambda: pick('letters'),
-              bg='#8e44ad', fg='white', font=('Arial', 11, 'bold'),
-              relief='flat', padx=14, pady=7, cursor='hand2').pack(fill='x', padx=12, pady=4)
-
-    root.update_idletasks()
-    w = root.winfo_reqwidth()
-    h = root.winfo_reqheight()
-    sw = root.winfo_screenwidth()
-    sh = root.winfo_screenheight()
-    root.geometry(f"+{(sw - w) // 2}+{(sh - h) // 2}")
-
-    root.grab_set()
-    root.mainloop()
-    return result[0]
-
-
 # Countries that ship to the USA (for filtering)
 USA_COUNTRY_VALUES = {"United States", "United States of America", "USA", "US"}
 
 class EltaShippingApp:
-    def __init__(self, root, filepath, include_usa=True, mode='both'):
+    def __init__(self, root, filepath, include_usa=True):
         self.root = root
         self.filepath = filepath
         self.include_usa = include_usa
-        self.mode = mode  # 'both' or 'labels'
         self.root.title("ELTA Shipping Label Generator")
         self.root.geometry("1000x750")
 
@@ -709,9 +479,9 @@ class EltaShippingApp:
         
         # Start the ELTA automation
         self.root.destroy()  # Close the tkinter window
-        process_elta_labels(to_process, self.sender_email, generate_letters=(self.mode == 'both'))
+        process_elta_labels(to_process, self.sender_email)
 
-def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com", generate_letters=True):
+def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com"):
     """Process ELTA label creation for the given shipping records"""
     if not shipping_records:
         print("No shipping records to process.")
@@ -1004,8 +774,8 @@ def process_all_records(shipping_records, driver):
                 # Select country and service type for this order
                 select_country_and_service(driver, record.get('ship_country', 'United States'))
 
-                # Service → Sender (step 1) — sender already filled, so silently skip if button not found
-                find_and_click_next_button(driver, step=1, quiet=True)
+                # Service → Sender (step 1)
+                find_and_click_next_button(driver, step=1)
                 WebDriverWait(driver, 15).until(
                     EC.visibility_of_element_located((By.ID, "SenderFirstName"))
                 )
@@ -1084,13 +854,6 @@ def process_all_records(shipping_records, driver):
         except Exception as e:
             print(f"⚠ Could not save to customer DB: {e}")
 
-        # Generate thank-you letter
-        if generate_letters:
-            try:
-                generate_thank_you(record)
-            except Exception as e:
-                print(f"⚠ Could not generate thank-you letter: {e}")
-
         # Wait before next record
         human_delay(2, 3)
 
@@ -1127,18 +890,9 @@ def select_country_and_service(driver, country="United States"):
             human_delay(0.05, 0.1)
         
         human_delay(0.5, 1)  # Wait for search results
-
-        # Click the exact matching option (avoids "Spain Canary Islands" etc.)
-        try:
-            exact = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.XPATH,
-                    f"//li[contains(@class,'select2-results__option') and normalize-space(text())='{country}']"
-                ))
-            )
-            exact.click()
-        except Exception:
-            # Fall back to Enter if exact match not found
-            search_input.send_keys(Keys.ENTER)
+        
+        # Press Enter to select
+        search_input.send_keys(Keys.ENTER)
         print(f"✓ Selected country: {country}")
         
         # Wait for the select2 dropdown to close completely
@@ -1510,7 +1264,7 @@ def fill_field(driver, field_label, value):
         except Exception as e2:
             print(f"Alternative method also failed for {field_label}: {str(e2)}")
 
-def find_and_click_next_button(driver, step=None, quiet=False):
+def find_and_click_next_button(driver, step=None):
     """Click the Επόμενο button for the given wizard step.
 
     step=None or 1 → service selection step  (no data-step attr)
@@ -1540,9 +1294,8 @@ def find_and_click_next_button(driver, step=None, quiet=False):
         return True
     except Exception as e:
         print(f"⚠ Could not click btn-next step={step or 1}: {e}")
-        if not quiet:
-            wait_for_user("Please click the Επόμενο button manually, then click Done.")
-        return False
+        wait_for_user("Please click the Επόμενο button manually, then click Done.")
+        return True
 
 # Main execution block
 if __name__ == "__main__":
@@ -1551,29 +1304,14 @@ if __name__ == "__main__":
         # 1. Pick the orders file
         filepath = ask_for_orders_file()
 
-        # 2. Ask what to do
-        mode = ask_mode()
+        # 2. Ask about USA — both before main window to avoid two-Tk conflict
+        include_usa = ask_yes_no("Shall I create labels for USA orders too?")
 
-        if mode == 'letters':
-            # Letters-only: no browser needed
-            records = load_orders_from_html(filepath)
-            # Filter out USA if desired (USA orders rarely get thank-you notes via ELTA)
-            non_usa = [r for r in records if r.get('ship_country', '') not in USA_COUNTRY_VALUES]
-            print(f"\nGenerating thank-you letters for {len(non_usa)} record(s)...")
-            for record in non_usa:
-                try:
-                    generate_thank_you(record)
-                except Exception as e:
-                    print(f"⚠ Letter failed for {record.get('full_name', '?')}: {e}")
-            print("\nDone. Letters saved to", OUTPUT_DIR)
-        else:
-            # Labels (+ optional letters)
-            include_usa = ask_yes_no("Shall I create labels for USA orders too?")
-
-            root = tk.Tk()
-            app = EltaShippingApp(root, filepath=filepath, include_usa=include_usa, mode=mode)
-            root.mainloop()
-            print("Mainloop finished")
+        # 3. Open main window
+        root = tk.Tk()
+        app = EltaShippingApp(root, filepath=filepath, include_usa=include_usa)
+        root.mainloop()
+        print("Mainloop finished")
     except Exception as e:
         print(f"Error occurred: {e}")
         import traceback

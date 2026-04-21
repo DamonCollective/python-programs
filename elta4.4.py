@@ -435,13 +435,13 @@ def ask_mode():
     result = ['both']
 
     root = tk.Tk()
-    root.title("Τι θέλετε να κάνετε;")
+    root.title("What to do?")
     root.attributes('-topmost', True)
     root.lift()
     root.focus_force()
     root.resizable(False, False)
 
-    tk.Label(root, text="Τι θέλετε να εκτελεστεί;", wraplength=380, justify='center',
+    tk.Label(root, text="What would you like to run?", wraplength=380, justify='center',
              pady=14, padx=16, font=('Arial', 12, 'bold')).pack()
 
     btn_frame = tk.Frame(root)
@@ -451,13 +451,13 @@ def ask_mode():
         result[0] = val
         root.destroy()
 
-    tk.Button(btn_frame, text="Ετικέτες + Ευχαριστήρια", command=lambda: pick('both'),
+    tk.Button(btn_frame, text="Labels + Thank-you Letters", command=lambda: pick('both'),
               bg='#2980b9', fg='white', font=('Arial', 11, 'bold'),
               relief='flat', padx=14, pady=7, cursor='hand2').pack(fill='x', padx=12, pady=4)
-    tk.Button(btn_frame, text="Μόνο Ετικέτες", command=lambda: pick('labels'),
+    tk.Button(btn_frame, text="Labels Only", command=lambda: pick('labels'),
               bg='#27ae60', fg='white', font=('Arial', 11, 'bold'),
               relief='flat', padx=14, pady=7, cursor='hand2').pack(fill='x', padx=12, pady=4)
-    tk.Button(btn_frame, text="Μόνο Ευχαριστήρια", command=lambda: pick('letters'),
+    tk.Button(btn_frame, text="Thank-you Letters Only", command=lambda: pick('letters'),
               bg='#8e44ad', fg='white', font=('Arial', 11, 'bold'),
               relief='flat', padx=14, pady=7, cursor='hand2').pack(fill='x', padx=12, pady=4)
 
@@ -476,252 +476,404 @@ def ask_mode():
 # Countries that ship to the USA (for filtering)
 USA_COUNTRY_VALUES = {"United States", "United States of America", "USA", "US"}
 
+
+def show_order_selection(records):
+    """Show a table of all orders with checkboxes. Returns the selected records."""
+    selected = []
+
+    root = tk.Tk()
+    root.title("ELTA 4.4 — Select Orders")
+    root.attributes('-topmost', True)
+    root.geometry("1050x560")
+    root.resizable(True, True)
+
+    # --- top label ---
+    tk.Label(root, text="Select orders to process:",
+             font=('Arial', 12, 'bold'), pady=8).pack()
+
+    # --- treeview frame ---
+    tree_frame = tk.Frame(root)
+    tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
+
+    cols = ('#', 'Name', 'Country', 'City', 'Street', 'Street 2', 'ZIP')
+    tree = ttk.Treeview(tree_frame, columns=cols, show='headings', selectmode='none')
+
+    tree.column('#',        width=30,  anchor='center', stretch=False)
+    tree.column('Name',     width=200, anchor='w')
+    tree.column('Country',  width=130, anchor='w')
+    tree.column('City',     width=130, anchor='w')
+    tree.column('Street',   width=200, anchor='w')
+    tree.column('Street 2', width=160, anchor='w')
+    tree.column('ZIP',      width=70,  anchor='w')
+
+    for c in cols:
+        tree.heading(c, text=c)
+
+    scrollbar = ttk.Scrollbar(tree_frame, orient='vertical', command=tree.yview)
+    tree.configure(yscrollcommand=scrollbar.set)
+    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+    tree.pack(fill=tk.BOTH, expand=True)
+
+    # checked state per iid
+    checked = {}
+
+    def row_tag(iid):
+        return 'checked' if checked.get(iid) else 'unchecked'
+
+    tree.tag_configure('checked',   background='#d4edda')
+    tree.tag_configure('unchecked', background='#f8f9fa')
+    tree.tag_configure('usa',       background='#fff3cd')
+
+    def refresh_row(iid):
+        tree.item(iid, tags=(row_tag(iid),))
+        # update the # column with ✓ or ☐
+        vals = list(tree.item(iid, 'values'))
+        vals[0] = '✓' if checked[iid] else '☐'
+        tree.item(iid, values=vals)
+
+    def on_click(event):
+        iid = tree.identify_row(event.y)
+        if iid:
+            checked[iid] = not checked[iid]
+            refresh_row(iid)
+            update_count()
+
+    tree.bind('<Button-1>', on_click)
+
+    count_var = tk.StringVar()
+
+    def update_count():
+        n = sum(1 for v in checked.values() if v)
+        count_var.set(f"{n} / {len(records)} selected")
+
+    # populate rows
+    for i, r in enumerate(records):
+        name    = f"{r.get('first_name','')} {r.get('last_name','')}".strip()
+        country = r.get('ship_country', '')
+        street  = f"{r.get('street_1','')} {r.get('street_number','')}".strip()
+        iid     = str(i)
+        is_usa  = country in USA_COUNTRY_VALUES
+        checked[iid] = not is_usa   # pre-check non-USA, leave USA unchecked
+        tree.insert('', 'end', iid=iid, values=(
+            '✓' if checked[iid] else '☐',
+            name, country,
+            r.get('ship_city', ''),
+            street,
+            r.get('street_2', ''),
+            r.get('ship_zipcode', ''),
+        ))
+        tree.item(iid, tags=(row_tag(iid),))
+
+    update_count()
+
+    # --- button bar ---
+    btn_frame = tk.Frame(root)
+    btn_frame.pack(fill=tk.X, padx=10, pady=6)
+
+    def select_all():
+        for iid in checked:
+            checked[iid] = True
+            refresh_row(iid)
+        update_count()
+
+    def deselect_all():
+        for iid in checked:
+            checked[iid] = False
+            refresh_row(iid)
+        update_count()
+
+    def toggle_usa():
+        """Toggle USA orders: if any USA checked → uncheck all USA; else check all USA."""
+        usa_iids = [str(i) for i, r in enumerate(records)
+                    if r.get('ship_country','') in USA_COUNTRY_VALUES]
+        any_checked = any(checked[iid] for iid in usa_iids)
+        for iid in usa_iids:
+            checked[iid] = not any_checked
+            refresh_row(iid)
+        update_count()
+
+    def proceed():
+        for i, r in enumerate(records):
+            if checked.get(str(i)):
+                selected.append(r)
+        root.destroy()
+
+    tk.Button(btn_frame, text="Select All",   command=select_all,
+              bg='#27ae60', fg='white', font=('Arial', 10, 'bold'),
+              relief='flat', padx=10, pady=5).pack(side=tk.LEFT, padx=4)
+    tk.Button(btn_frame, text="Deselect All", command=deselect_all,
+              bg='#c0392b', fg='white', font=('Arial', 10, 'bold'),
+              relief='flat', padx=10, pady=5).pack(side=tk.LEFT, padx=4)
+    tk.Button(btn_frame, text="Toggle USA",      command=toggle_usa,
+              bg='#e67e22', fg='white', font=('Arial', 10, 'bold'),
+              relief='flat', padx=10, pady=5).pack(side=tk.LEFT, padx=4)
+
+    tk.Label(btn_frame, textvariable=count_var,
+             font=('Arial', 10), fg='#333').pack(side=tk.LEFT, padx=16)
+
+    tk.Button(btn_frame, text="▶  Proceed", command=proceed,
+              bg='#2980b9', fg='white', font=('Arial', 11, 'bold'),
+              relief='flat', padx=18, pady=6).pack(side=tk.RIGHT, padx=6)
+
+    root.grab_set()
+    root.mainloop()
+    return selected
+
+
+# ── Review & Edit screen ─────────────────────────────────────────────────────
+
 class EltaShippingApp:
-    def __init__(self, root, filepath, include_usa=True, mode='both'):
+    """Review & edit screen shown after order selection, before browser automation."""
+
+    # Fields that must not be empty before processing
+    REQUIRED = {
+        'first_name', 'last_name',
+        'street_1', 'street_number',
+        'ship_zipcode', 'ship_city', 'ship_country',
+        'weight_kg', 'length_cm', 'width_cm', 'height_cm',
+    }
+
+    # Grouped field layout: (field_key, display_label)
+    SECTIONS = [
+        ("Name", [
+            ('first_name',    'First Name *'),
+            ('last_name',     'Last Name *'),
+        ]),
+        ("Address", [
+            ('street_1',      'Street Name *'),
+            ('street_number', 'Street Number *'),
+            ('street_2',      'Address Line 2'),
+            ('ship_city',     'City *'),
+            ('ship_state',    'State / Region'),
+            ('ship_zipcode',  'ZIP / Postal Code *'),
+            ('ship_country',  'Country *'),
+        ]),
+        ("Contact", [
+            ('email', 'Email'),
+            ('phone', 'Phone'),
+        ]),
+        ("Parcel", [
+            ('weight_kg',   'Weight (kg) *'),
+            ('length_cm',   'Length (cm) *'),
+            ('width_cm',    'Width (cm) *'),
+            ('height_cm',   'Height (cm) *'),
+            ('customs_qty', 'Customs Qty'),
+        ]),
+    ]
+
+    def __init__(self, root, records, mode='both'):
         self.root = root
-        self.filepath = filepath
-        self.include_usa = include_usa
-        self.mode = mode  # 'both' or 'labels'
-        self.root.title("ELTA Shipping Label Generator")
-        self.root.geometry("1000x750")
-
-        # Store shipping data
-        self.shipping_data = []
+        self.records = records
+        self.mode = mode
         self.current_index = 0
-        
-        # Create main frame
-        main_frame = ttk.Frame(root, padding="10")
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        
-        # Create data display/edit frame
-        self.data_frame = ttk.LabelFrame(main_frame, text="Shipping Data", padding="10")
-        self.data_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        
-        # Create entry fields
-        self.entries = {}
-        
-        # Define fields to display
-        self.fields = [
-            "full_name", "first_name", "last_name",
-            "street_1", "street_number", "street_2",
-            "ship_city", "ship_state", "ship_zipcode", "ship_country",
-            "email", "phone", "buyer"
-        ]
 
-        # Editable defaults (weight/dimensions)
-        self.default_values = {
-            "weight_kg":   "0,49",
-            "length_cm":   "21",
-            "width_cm":    "28",
-            "height_cm":   "12",
-            "customs_qty": "2"
-        }
+        root.title("ELTA 4.4 — Review & Edit Orders")
+        root.geometry("860x660")
+        root.attributes('-topmost', True)
+        root.resizable(True, True)
 
-        # Sender's email for ELTA login (fixed)
-        self.sender_email = "math4econ@gmail.com"
-        
-        # Create entry fields for CSV data
-        row = 0
-        for field in self.fields:
-            ttk.Label(self.data_frame, text=field.replace('_', ' ').title() + ":").grid(
-                row=row, column=0, sticky=tk.W, padx=5, pady=2)
-            
-            self.entries[field] = ttk.Entry(self.data_frame, width=50)
-            self.entries[field].grid(row=row, column=1, sticky=tk.W, padx=5, pady=2)
-            row += 1
-        
-        # Create entry fields for default data
-        for field, value in self.default_values.items():
-            ttk.Label(self.data_frame, text=field.replace('_', ' ').title() + ":").grid(
-                row=row, column=0, sticky=tk.W, padx=5, pady=2)
-            
-            self.entries[field] = ttk.Entry(self.data_frame, width=50)
-            self.entries[field].grid(row=row, column=1, sticky=tk.W, padx=5, pady=2)
-            self.entries[field].insert(0, value)
-            row += 1
-        
-        # Add print label checkbox
-        self.print_label_var = tk.BooleanVar(value=True)
-        self.print_label_check = ttk.Checkbutton(
-            self.data_frame, 
-            text="Print Label?", 
-            variable=self.print_label_var
-        )
-        self.print_label_check.grid(row=row, column=0, columnspan=2, sticky=tk.W, padx=5, pady=10)
-        
-        # Navigation buttons
-        nav_frame = ttk.Frame(main_frame)
-        nav_frame.pack(fill=tk.X, padx=10, pady=5)
-        
-        ttk.Button(nav_frame, text="Previous", command=self.prev_record).pack(side=tk.LEFT, padx=5)
-        ttk.Button(nav_frame, text="Next", command=self.next_record).pack(side=tk.LEFT, padx=5)
-        
-        # Status label
+        # ── Title bar ──
+        tk.Label(root,
+                 text=f"Review & Edit  —  {len(records)} order(s) selected",
+                 font=('Arial', 13, 'bold'), pady=8).pack()
+
+        # ── Navigation bar ──
+        nav = tk.Frame(root, bg='#ecf0f1', relief='ridge', bd=1)
+        nav.pack(fill=tk.X, padx=10, pady=(0, 4))
+
+        self.prev_btn = tk.Button(nav, text="◀ Previous", command=self.prev_record,
+                                  font=('Arial', 10, 'bold'), bg='#95a5a6', fg='white',
+                                  relief='flat', padx=10, pady=4, cursor='hand2')
+        self.prev_btn.pack(side=tk.LEFT, padx=6, pady=4)
+
         self.status_var = tk.StringVar()
-        ttk.Label(nav_frame, textvariable=self.status_var).pack(side=tk.LEFT, padx=20)
-        
-        # Action buttons
-        action_frame = ttk.Frame(main_frame)
-        action_frame.pack(fill=tk.X, padx=10, pady=10)
-        
-        ttk.Button(action_frame, text="Start Processing", command=self.start_processing).pack(side=tk.RIGHT, padx=5)
-        ttk.Button(action_frame, text="Save Changes", command=self.save_changes).pack(side=tk.RIGHT, padx=5)
-        
-        # Load orders from HTML file
-        self.load_orders()
+        tk.Label(nav, textvariable=self.status_var, font=('Arial', 10),
+                 fg='#2c3e50', bg='#ecf0f1').pack(side=tk.LEFT, padx=12)
 
-    def load_orders(self):
-        """Load orders from Etsy HTML file."""
-        try:
-            self.shipping_data = load_orders_from_html(self.filepath)
+        self.next_btn = tk.Button(nav, text="Next ▶", command=self.next_record,
+                                  font=('Arial', 10, 'bold'), bg='#95a5a6', fg='white',
+                                  relief='flat', padx=10, pady=4, cursor='hand2')
+        self.next_btn.pack(side=tk.RIGHT, padx=6, pady=4)
 
-            # Add weight/dimension defaults
-            for r in self.shipping_data:
-                for k, v in self.default_values.items():
-                    r.setdefault(k, v)
+        # ── Scrollable fields area ──
+        outer = tk.Frame(root)
+        outer.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
 
-            # Filter USA if needed
-            if not self.include_usa:
-                n_before = len(self.shipping_data)
-                self.shipping_data = [r for r in self.shipping_data
-                                      if r.get('ship_country', '') not in USA_COUNTRY_VALUES]
-                skipped = n_before - len(self.shipping_data)
-                if skipped:
-                    print(f"ℹ Skipping {skipped} USA order(s)")
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        vsb = ttk.Scrollbar(outer, orient='vertical', command=canvas.yview)
+        self.fields_frame = tk.Frame(canvas)
+        self.fields_frame.bind(
+            '<Configure>',
+            lambda e: canvas.configure(scrollregion=canvas.bbox('all'))
+        )
+        canvas.create_window((0, 0), window=self.fields_frame, anchor='nw')
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-            # Check customer DB — offer to use stored address for known customers
-            db = load_customer_db()
-            for record in self.shipping_data:
-                key = customer_db_key(record)
-                if key and key in db:
-                    stored = db[key]
-                    addr_summary = (
-                        f"{stored.get('street_1', '')} {stored.get('street_number', '')}, "
-                        f"{stored.get('ship_zipcode', '')} {stored.get('ship_city', '')}, "
-                        f"{stored.get('ship_country', '')}"
-                    )
-                    use_stored = messagebox.askyesno(
-                        "Previous Address Found",
-                        f"Previous address found for {record['full_name']}:\n\n"
-                        f"{addr_summary}\n\nUse it?"
-                    )
-                    if use_stored:
-                        for field in ('street_1', 'street_number', 'street_2',
-                                      'ship_city', 'ship_state', 'ship_zipcode', 'ship_country'):
-                            if stored.get(field) is not None:
-                                record[field] = stored[field]
-                        print(f"✓ Using stored address for {record['full_name']}")
+        # Bind mousewheel to canvas
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind_all('<MouseWheel>', _on_mousewheel)
 
-            # Data check log
-            print(f"\n{'='*75}")
-            print(f"LOADED {len(self.shipping_data)} ORDERS:")
-            print(f"{'#':<4} {'Name':<26} {'Email':<30} {'Street':<28} {'No.':<5} {'ZIP':<8} {'City':<18} {'Country'}")
-            print(f"{'-'*4} {'-'*26} {'-'*30} {'-'*28} {'-'*5} {'-'*8} {'-'*18} {'-'*12}")
-            for i, r in enumerate(self.shipping_data, 1):
-                name = f"{r.get('first_name','')} {r.get('last_name','')}".strip()
-                print(f"{i:<4} {name:<26} {r.get('email',''):<30} {r.get('street_1',''):<28} "
-                      f"{r.get('street_number',''):<5} {r.get('ship_zipcode',''):<8} "
-                      f"{r.get('ship_city',''):<18} {r.get('ship_country','')}")
-            print(f"{'='*75}\n")
+        self.entries = {}
+        self._build_fields()
 
-            if self.shipping_data:
-                self.display_record(0)
-                self.status_var.set(f"Record 1 of {len(self.shipping_data)}")
-            else:
-                messagebox.showwarning("No Orders", "No orders found in the file.")
+        # ── Action bar ──
+        actions = tk.Frame(root, bg='#dfe6e9', relief='ridge', bd=1)
+        actions.pack(fill=tk.X, padx=10, pady=(4, 8))
 
-        except Exception as e:
-            messagebox.showerror("Error Loading Orders", f"Error: {str(e)}")
-    
+        tk.Button(actions, text="Save Changes", command=self.save_changes,
+                  font=('Arial', 10), bg='#e67e22', fg='white',
+                  relief='flat', padx=12, pady=5, cursor='hand2').pack(side=tk.LEFT, padx=6, pady=6)
+
+        tk.Button(actions, text="▶▶  Start Processing", command=self.start_processing,
+                  font=('Arial', 12, 'bold'), bg='#27ae60', fg='white',
+                  relief='flat', padx=18, pady=7, cursor='hand2').pack(side=tk.RIGHT, padx=6, pady=6)
+
+        # Load first record after the window is fully drawn (avoids frozen Entry widgets)
+        root.after(50, self._init_data)
+
+    def _build_fields(self):
+        f = self.fields_frame
+        row = 0
+        for section_name, fields in self.SECTIONS:
+            # Section header
+            hdr = tk.Label(f, text=section_name,
+                           font=('Arial', 10, 'bold'), anchor='w',
+                           bg='#d6eaf8', padx=8, pady=3, relief='flat')
+            hdr.grid(row=row, column=0, columnspan=2, sticky='ew', pady=(10, 2), padx=2)
+            row += 1
+            for field_key, label_text in fields:
+                tk.Label(f, text=label_text, font=('Arial', 10),
+                         anchor='w', padx=8).grid(row=row, column=0, sticky='w', pady=2)
+                entry = tk.Entry(f, font=('Arial', 10), width=46)
+                entry.grid(row=row, column=1, sticky='ew', padx=(4, 12), pady=2)
+                self.entries[field_key] = entry
+                row += 1
+        f.grid_columnconfigure(1, weight=1)
+
+    def _init_data(self):
+        """Check customer DB for repeat customers, then display first record."""
+        db = load_customer_db()
+        for record in self.records:
+            key = customer_db_key(record)
+            if not (key and key in db):
+                continue
+            stored = db[key]
+            addr_line = (
+                f"{stored.get('street_1','')} {stored.get('street_number','')}".strip() + ", "
+                f"{stored.get('ship_zipcode','')} {stored.get('ship_city','')}".strip() + ", "
+                f"{stored.get('ship_country','')}".strip()
+            )
+            parcel_line = (
+                f"Weight: {stored.get('weight_kg','?')} kg  |  "
+                f"{stored.get('length_cm','?')} × {stored.get('width_cm','?')} × "
+                f"{stored.get('height_cm','?')} cm"
+            )
+            use_stored = messagebox.askyesno(
+                "Repeat Customer",
+                f"Stored data found for {record['full_name']}:\n\n"
+                f"Address: {addr_line}\n"
+                f"Parcel:  {parcel_line}\n\n"
+                "Use stored address + parcel details?",
+                parent=self.root
+            )
+            if use_stored:
+                for field in ('street_1', 'street_number', 'street_2',
+                              'ship_city', 'ship_state', 'ship_zipcode', 'ship_country',
+                              'weight_kg', 'length_cm', 'width_cm', 'height_cm'):
+                    if stored.get(field) is not None:
+                        record[field] = stored[field]
+                print(f"✓ Using stored data for {record['full_name']}")
+
+        self.display_record(0)
+
     def display_record(self, index):
-        """Display record at the given index"""
-        if 0 <= index < len(self.shipping_data):
-            # Clear existing entries
-            for field in self.entries:
-                self.entries[field].delete(0, tk.END)
-            
-            # Populate with data
-            record = self.shipping_data[index]
-            for field in self.entries:
-                if field in record and record[field]:
-                    self.entries[field].insert(0, record[field])
-            
-            # Set checkbox
-            self.print_label_var.set(record.get("print_label", True))
-            
-            self.current_index = index
-    
-    def save_changes(self):
-        """Save changes to the current record"""
-        if 0 <= self.current_index < len(self.shipping_data):
-            record = self.shipping_data[self.current_index]
-            
-            # Update with values from entries
-            for field in self.entries:
-                record[field] = self.entries[field].get()
-            
-            # Update print label flag
-            record["print_label"] = self.print_label_var.get()
-            
-            # No messagebox here - we'll handle feedback in the navigation methods
-    
-    def next_record(self):
-        """Move to the next record"""
-        if self.current_index < len(self.shipping_data) - 1:
-            self.save_changes()
-            
-            # Show a temporary message that disappears after 0.3 seconds
-            self.status_var.set("Changes saved!")
-            self.root.update()  # Force update to show message
-            self.root.after(300, lambda: self.update_status_after_save())
-            
-            self.display_record(self.current_index + 1)
-    
-    def update_status_after_save(self):
-        """Update the status bar after saving changes"""
-        self.status_var.set(f"Record {self.current_index + 1} of {len(self.shipping_data)}")
-    
-    def prev_record(self):
-        """Move to the previous record"""
-        if self.current_index > 0:
-            self.save_changes()
-            
-            # Show a temporary message that disappears after 0.3 seconds
-            self.status_var.set("Changes saved!")
-            self.root.update()  # Force update to show message
-            self.root.after(300, lambda: self.update_status_after_save())
-            
-            self.display_record(self.current_index - 1)
-    
-    def start_processing(self):
-        """Start the ELTA automation process"""
-        # Save current changes
-        self.save_changes()
-        
-        # Filter records where print_label is True
-        to_process = [r for r in self.shipping_data if r.get("print_label", True)]
-        
-        if not to_process:
-            messagebox.showwarning("No Labels", "No records selected for label printing.")
+        if not (0 <= index < len(self.records)):
             return
-        
-        messagebox.showinfo("Processing", f"Starting ELTA automation for {len(to_process)} labels.")
-        
-        # Start the ELTA automation
-        self.root.destroy()  # Close the tkinter window
-        process_elta_labels(to_process, self.sender_email, generate_letters=(self.mode == 'both'))
+        self.current_index = index
+        record = self.records[index]
+
+        for field, entry in self.entries.items():
+            entry.delete(0, tk.END)
+            val = record.get(field, '')
+            if val:
+                entry.insert(0, str(val))
+
+        self._highlight_required()
+        name = record.get('full_name') or f"{record.get('first_name','')} {record.get('last_name','')}".strip()
+        self.status_var.set(f"Order {index + 1} of {len(self.records)}  —  {name}")
+        self.prev_btn.config(state=tk.NORMAL if index > 0 else tk.DISABLED)
+        self.next_btn.config(state=tk.NORMAL if index < len(self.records) - 1 else tk.DISABLED)
+
+    def _highlight_required(self):
+        for field, entry in self.entries.items():
+            if field in self.REQUIRED and not entry.get().strip():
+                entry.config(bg='#ffd7d7')
+            else:
+                entry.config(bg='white')
+
+    def save_changes(self):
+        if not (0 <= self.current_index < len(self.records)):
+            return
+        record = self.records[self.current_index]
+        for field, entry in self.entries.items():
+            record[field] = entry.get().strip()
+        # Keep full_name in sync
+        record['full_name'] = f"{record.get('first_name','')} {record.get('last_name','')}".strip()
+        self._highlight_required()
+        name = record.get('full_name', '')
+        self.status_var.set(
+            f"Order {self.current_index + 1} of {len(self.records)}  —  {name}  ✓ saved"
+        )
+
+    def next_record(self):
+        self.save_changes()
+        if self.current_index < len(self.records) - 1:
+            self.display_record(self.current_index + 1)
+
+    def prev_record(self):
+        self.save_changes()
+        if self.current_index > 0:
+            self.display_record(self.current_index - 1)
+
+    def start_processing(self):
+        self.save_changes()
+
+        # Warn about any missing required fields
+        problems = []
+        for i, r in enumerate(self.records):
+            missing = [f for f in self.REQUIRED if not r.get(f, '').strip()]
+            if missing:
+                problems.append(f"Order {i+1} ({r.get('full_name','?')}): {', '.join(missing)}")
+
+        if problems:
+            msg = ("The following orders have missing required fields:\n\n"
+                   + "\n".join(problems)
+                   + "\n\nProceed anyway?")
+            if not messagebox.askyesno("Missing Fields", msg, parent=self.root):
+                return
+
+        generate_letters = (self.mode == 'both')
+        self.root.destroy()
+        process_elta_labels(self.records, sender_email="math4econ@gmail.com",
+                            generate_letters=generate_letters)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 
 def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com", generate_letters=True):
     """Process ELTA label creation for the given shipping records"""
     if not shipping_records:
         print("No shipping records to process.")
         return
-    
-    # Configure Firefox
-    options = webdriver.FirefoxOptions()
-    options.binary_location = "/snap/firefox/current/usr/lib/firefox/firefox"
 
-    # Initialize WebDriver
+    # Configure Firefox (auto-detect on Windows/macOS; snap path on Linux)
+    import platform
+    options = webdriver.FirefoxOptions()
+    if platform.system() == "Linux":
+        options.binary_location = "/snap/firefox/current/usr/lib/firefox/firefox"
     driver = webdriver.Firefox(options=options)
 
     try:
@@ -760,7 +912,7 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com", ge
         # Ask user to complete CAPTCHA manually
         print("\n⚠️ ACTION REQUIRED: Please complete the CAPTCHA in the browser.")
         print("When you've completed the CAPTCHA and accepted terms, the program will automatically continue...")
-        
+
         # Wait for user to solve CAPTCHA and submit the form themselves
         print("Waiting for you to solve the CAPTCHA and click Next in the browser...")
         try:
@@ -773,62 +925,62 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com", ge
         except Exception as e:
             print(f"Timed out waiting for CAPTCHA: {str(e)}")
             wait_for_user("Please complete the CAPTCHA and click Next in the browser, then click OK here.")
-        
+
         # --- HANDLE COUNTRY SELECTION ---
         print("Selecting country...")
-        
+
         # Get country from first record (translate name if needed)
         country = shipping_records[0].get('ship_country', 'United States')
         country = COUNTRY_NAME_MAP.get(country, country)
-        
+
         # Find the country Select2 dropdown
         try:
             # Find all select2 dropdown containers
             select2_containers = driver.find_elements(By.XPATH, "//span[contains(@class, 'select2-container')]")
             print(f"Found {len(select2_containers)} Select2 containers")
-            
+
             # Find the country dropdown container
             country_dropdown = WebDriverWait(driver, 10).until(
                 EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'select2-selection')]"))
             )
-            
+
             # Click to open the dropdown
             country_dropdown.click()
             print("Clicked country dropdown")
             human_delay(0.5, 1)
-            
+
             # Wait for dropdown to open and search for the country
             search_input = WebDriverWait(driver, 5).until(
                 EC.presence_of_element_located((By.XPATH, "//input[contains(@class, 'select2-search__field')]"))
             )
-            
+
             # Type country with human-like behavior
             for char in country:
                 search_input.send_keys(char)
                 human_delay(0.05, 0.1)
-            
+
             human_delay(0.5, 1)  # Wait for search results
-            
+
             # Press Enter to select
             search_input.send_keys(Keys.ENTER)
             print(f"✓ Selected country: {country}")
-            
+
             # Wait for the select2 dropdown to close completely
             WebDriverWait(driver, 10).until(
                 EC.invisibility_of_element_located((By.XPATH, "//span[@class='select2-dropdown']"))
             )
             print("✓ Country dropdown closed")
-            
+
             # Additional delay to make sure all AJAX calls complete and page updates
             human_delay(2, 3)
         except Exception as e:
             print(f"Automated country selection failed: {str(e)}")
             safe_screenshot(driver, "country_selection_failed.png")
-            
+
             wait_for_user(f"Please select '{country}' manually in the country dropdown, then click OK.")
             # Extra delay after manual interaction
             human_delay(2, 3)
-        
+
         # --- HANDLE DELIVERY TYPE SELECTION ---
         print("Selecting delivery type...")
 
@@ -861,16 +1013,16 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com", ge
             print(f"Automated delivery type selection failed: {str(e)}")
             safe_screenshot(driver, "delivery_selection_failed.png")
             wait_for_user("Please select '854 LL' manually in the delivery type dropdown, then click OK.")
-        
+
         human_delay(1, 2)  # Wait for any updates after delivery selection
-        
+
         # Click Next: service → sender
         find_and_click_next_button(driver, step=1)
         WebDriverWait(driver, 15).until(
             EC.visibility_of_element_located((By.ID, "SenderFirstName"))
         )
         print("✓ Sender step active")
-        
+
         # --- HANDLE SENDER DATA FORM ---
         print("Filling sender data form...")
 
@@ -890,13 +1042,13 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com", ge
             def fill_field(field_label, value):
                 if not value:  # Skip empty values
                     return
-                
+
                 try:
                     # Find field by XPath — use contains() to handle asterisks/extra text in labels
                     input_field = WebDriverWait(driver, 5).until(
                         EC.presence_of_element_located((By.XPATH, f"//label[contains(normalize-space(),'{field_label}')]/following::input[1]"))
                     )
-                    
+
                     # Clear field and type value with human-like delay
                     input_field.clear()
                     human_delay(0.2, 0.5)
@@ -906,12 +1058,12 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com", ge
                     print(f"✓ Filled {field_label}: {value}")
                 except Exception as e:
                     print(f"Error finding field for {field_label}: {str(e)}")
-                    
+
                     # Try alternative approach with JavaScript
                     try:
                         # Get all inputs and look for nearby labels
                         all_inputs = driver.find_elements(By.TAG_NAME, "input")
-                        
+
                         for inp in all_inputs:
                             label_for_input = None
                             try:
@@ -928,7 +1080,7 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com", ge
                                 """, inp, field_label)
                             except:
                                 pass
-                            
+
                             if label_for_input and label_for_input.strip() == field_label.strip():
                                 # Found the right input
                                 inp.clear()
@@ -940,7 +1092,7 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com", ge
                                 break
                     except Exception as e2:
                         print(f"Alternative method also failed for {field_label}: {str(e2)}")
-            
+
             # Fill each required field
             for label, value in sender_data.items():
                 try:
@@ -948,13 +1100,13 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com", ge
                     human_delay(0.2, 0.5)  # Delay between fields
                 except Exception as e:
                     print(f"Error filling {label}: {str(e)}")
-            
+
             print("✓ Completed sender data form")
 
         except Exception as e:
             print(f"Error filling sender form: {str(e)}")
             safe_screenshot(driver, "sender_form_error.png")
-            
+
             wait_for_user("Please fill in the sender data manually, then click OK.")
 
         # Click Next: sender → receiver, then wait for receiver step
@@ -963,9 +1115,9 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com", ge
             EC.visibility_of_element_located((By.ID, "RecipientFirstName"))
         )
         print("✓ Receiver step active")
-        
+
         # Process each shipping record
-        process_all_records(shipping_records, driver)
+        process_all_records(shipping_records, driver, generate_letters)
 
     except Exception as e:
         print(f"Error occurred: {str(e)}")
@@ -977,17 +1129,17 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com", ge
         driver.quit()
         print("Browser closed.")
 
-def process_all_records(shipping_records, driver):
+def process_all_records(shipping_records, driver, generate_letters=True):
     """Process all shipping records one by one"""
     for index, record in enumerate(shipping_records):
         print(f"\n--- Processing record {index+1} of {len(shipping_records)} ---")
         print(f"Recipient: {record.get('first_name', '')} {record.get('last_name', '')}")
-        
+
         # If this is not the first record, we need to create a new shipment
         if index > 0:
             try:
                 print("Creating a new shipment for next recipient...")
-                
+
                 # Look for "New Shipment" or similar button
                 new_shipment_button = WebDriverWait(driver, 10).until(
                     EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), 'Νέα αποστολή')] | //button[contains(text(), 'Νέα αποστολή')] | //a[contains(@href, 'New')] | //a[contains(@href, 'Create')]"))
@@ -995,12 +1147,12 @@ def process_all_records(shipping_records, driver):
                 human_delay(0.5, 1.5)
                 new_shipment_button.click()
                 print("✓ Clicked 'New Shipment' button")
-                
+
                 # Wait for page to change to new shipment form
                 WebDriverWait(driver, 15).until(
                     lambda d: "Create" in d.current_url or "New" in d.current_url or len(d.find_elements(By.XPATH, "//div[contains(@class, 'load') or contains(@class, 'progress')]")) == 0
                 )
-                
+
                 # Select country and service type for this order
                 select_country_and_service(driver, record.get('ship_country', 'United States'))
 
@@ -1015,81 +1167,94 @@ def process_all_records(shipping_records, driver):
                     EC.visibility_of_element_located((By.ID, "RecipientFirstName"))
                 )
                 print("✓ Receiver step is now active")
-                
+
             except Exception as e:
                 print(f"Error creating new shipment: {str(e)}")
                 safe_screenshot(driver, f"new_shipment_error_{index}.png")
-                
+
                 wait_for_user("Please navigate to create a new shipment manually. When at the receiver form, click OK.")
-        
-        # --- HANDLE RECEIVER DATA FORM ---
-        print("Filling receiver data form...")
-        
-        # Define receiver data mapping from our record to ELTA form fields
-        receiver_data = {
-            "Όνομα": record.get("first_name", ""),           # First Name
-            "Επώνυμο": record.get("last_name", ""),          # Last Name
-            "Όνομα Οδού": record.get("street_1", ""),        # Street Name
-            "Αρ. Οδού": record.get("street_number", ""),     # Street Number
-            "Ταχ. Κώδικας": record.get("ship_zipcode", ""),  # Postal Code
-            "Πόλη": record.get("ship_city", ""),             # City
-            "E-Mail": record.get("email", ""),                # Buyer email from Etsy orders page
-        }
-        
-        # Fill in weight and dimensions
-        weight_data = {
-            "Βάρος (Kg)": record.get("weight_kg", "0,49")
-        }
-        
-        # Dimensions data
-        dimensions_data = {
-            "length": record.get("length_cm", "21"),
-            "width": record.get("width_cm", "28"),
-            "height": record.get("height_cm", "12")
-        }
-        
-        # Fill the receiver form (same page also has content/weight/dimensions)
-        fill_receiver_form(driver, receiver_data, weight_data, dimensions_data)
 
-        # Fill content description (on the same wizard page as receiver)
-        # Skipped automatically for EU countries — no customs form
-        country = record.get('ship_country', '')
-        fill_content_description(driver, country=country)
+        try:
+            # --- HANDLE RECEIVER DATA FORM ---
+            print("Filling receiver data form...")
 
-        # Click Next: receiver → customs (non-EU) or print (EU)
-        find_and_click_next_button(driver, step=3)
-        human_delay(1, 2)
+            # Define receiver data mapping from our record to ELTA form fields
+            receiver_data = {
+                "Όνομα": record.get("first_name", ""),           # First Name
+                "Επώνυμο": record.get("last_name", ""),          # Last Name
+                "Όνομα Οδού": record.get("street_1", ""),        # Street Name
+                "Αρ. Οδού": record.get("street_number", ""),     # Street Number
+                "Ταχ. Κώδικας": record.get("ship_zipcode", ""),  # Postal Code
+                "Πόλη": record.get("ship_city", ""),             # City
+                "E-Mail": record.get("email", ""),               # Buyer email from Etsy orders page
+                "Οργανισμός": record.get("street_2", ""),        # Address line 2 → Οργανισμός
+                "Σημείο παραλαβής": record.get("street_2", ""),  # Address line 2 → Σημείο παραλαβής
+            }
 
-        # For non-EU: fill the Τελωνειακή Δήλωση page, then click Next again
-        if country not in EU_COUNTRIES:
-            fill_customs_declaration(driver, record)
-            find_and_click_next_button(driver, step=4)
+            # Fill in weight and dimensions
+            weight_data = {
+                "Βάρος (Kg)": record.get("weight_kg", "0,49")
+            }
+
+            # Dimensions data
+            dimensions_data = {
+                "length": record.get("length_cm", "21"),
+                "width": record.get("width_cm", "28"),
+                "height": record.get("height_cm", "12")
+            }
+
+            # Fill the receiver form (same page also has content/weight/dimensions)
+            fill_receiver_form(driver, receiver_data, weight_data, dimensions_data)
+
+            # Fill content description (on the same wizard page as receiver)
+            # Skipped automatically for EU countries — no customs form
+            country = record.get('ship_country', '')
+            fill_content_description(driver, country=country)
+
+            # Click Next: receiver → customs (non-EU) or print (EU)
+            find_and_click_next_button(driver, step=3)
             human_delay(1, 2)
 
-        # Print the label
-        print_shipping_label(driver, record)
+            # For non-EU: fill the Τελωνειακή Δήλωση page, then click Next again
+            if country not in EU_COUNTRIES:
+                fill_customs_declaration(driver, record)
+                find_and_click_next_button(driver, step=4)
+                human_delay(1, 2)
 
-        # Save this customer's address to the DB for future orders
-        try:
-            db = load_customer_db()
-            key = customer_db_key(record)
-            if key:
-                db[key] = {k: record.get(k, '') for k in (
-                    'full_name', 'first_name', 'last_name',
-                    'street_1', 'street_number', 'street_2',
-                    'ship_city', 'ship_state', 'ship_zipcode', 'ship_country', 'email'
-                )}
-                save_customer_db(db)
-                print(f"✓ Saved address for {record['full_name']} to customer DB")
-        except Exception as e:
-            print(f"⚠ Could not save to customer DB: {e}")
+            # Print the label
+            print_shipping_label(driver, record)
 
-        # Generate thank-you letter
-        if generate_letters:
+            # Save this customer's address + parcel details to the DB for future orders
             try:
-                generate_thank_you(record)
+                db = load_customer_db()
+                key = customer_db_key(record)
+                if key:
+                    db[key] = {k: record.get(k, '') for k in (
+                        'full_name', 'first_name', 'last_name',
+                        'street_1', 'street_number', 'street_2',
+                        'ship_city', 'ship_state', 'ship_zipcode', 'ship_country', 'email',
+                        'weight_kg', 'length_cm', 'width_cm', 'height_cm',
+                    )}
+                    save_customer_db(db)
+                    print(f"✓ Saved address + parcel for {record['full_name']} to customer DB")
             except Exception as e:
-                print(f"⚠ Could not generate thank-you letter: {e}")
+                print(f"⚠ Could not save to customer DB: {e}")
+
+            # Generate thank-you letter
+            if generate_letters:
+                try:
+                    generate_thank_you(record)
+                except Exception as e:
+                    print(f"⚠ Could not generate thank-you letter: {e}")
+
+        except Exception as e:
+            print(f"❌ Error processing record {index+1} ({record.get('full_name', '?')}): {e}")
+            safe_screenshot(driver, f"record_{index+1}_error.png")
+            wait_for_user(
+                f"Error on record {index+1}: {record.get('full_name', '?')}\n\n"
+                f"{e}\n\n"
+                f"Fix it manually in the browser, then click Done to continue to the next label."
+            )
 
         # Wait before next record
         human_delay(2, 3)
@@ -1099,33 +1264,33 @@ def select_country_and_service(driver, country="United States"):
     country = COUNTRY_NAME_MAP.get(country, country)
     # --- HANDLE COUNTRY SELECTION ---
     print("Selecting country...")
-    
+
     # Find the country Select2 dropdown
     try:
         # Find all select2 dropdown containers
         select2_containers = driver.find_elements(By.XPATH, "//span[contains(@class, 'select2-container')]")
         print(f"Found {len(select2_containers)} Select2 containers")
-        
+
         # Find the country dropdown container
         country_dropdown = WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable((By.XPATH, "//span[contains(@class, 'select2-selection')]"))
         )
-        
+
         # Click to open the dropdown
         country_dropdown.click()
         print("Clicked country dropdown")
         human_delay(0.5, 1)
-        
+
         # Wait for dropdown to open and search for the country
         search_input = WebDriverWait(driver, 5).until(
             EC.presence_of_element_located((By.XPATH, "//input[contains(@class, 'select2-search__field')]"))
         )
-        
+
         # Type country with human-like behavior
         for char in country:
             search_input.send_keys(char)
             human_delay(0.05, 0.1)
-        
+
         human_delay(0.5, 1)  # Wait for search results
 
         # Click the exact matching option (avoids "Spain Canary Islands" etc.)
@@ -1140,22 +1305,22 @@ def select_country_and_service(driver, country="United States"):
             # Fall back to Enter if exact match not found
             search_input.send_keys(Keys.ENTER)
         print(f"✓ Selected country: {country}")
-        
+
         # Wait for the select2 dropdown to close completely
         WebDriverWait(driver, 10).until(
             EC.invisibility_of_element_located((By.XPATH, "//span[@class='select2-dropdown']"))
         )
         print("✓ Country dropdown closed")
-        
+
         # Additional delay to make sure all AJAX calls complete and page updates
         human_delay(2, 3)
     except Exception as e:
         print(f"Automated country selection failed: {str(e)}")
         safe_screenshot(driver, "country_selection_failed.png")
-        
+
         wait_for_user(f"Please select '{country}' manually in the country dropdown, then click OK.")
         human_delay(2, 3)
-    
+
     # --- HANDLE DELIVERY TYPE SELECTION ---
     print("Selecting delivery type...")
 
@@ -1208,13 +1373,13 @@ def fill_sender_form(driver):
                 human_delay(0.2, 0.5)  # Delay between fields
             except Exception as e:
                 print(f"Error filling {label}: {str(e)}")
-        
+
         print("✓ Completed sender data form")
 
     except Exception as e:
         print(f"Error filling sender form: {str(e)}")
         safe_screenshot(driver, "sender_form_error.png")
-        
+
         wait_for_user("Please fill in the sender data manually, then click OK.")
 
 def fill_by_id(driver, field_id, value):
@@ -1271,13 +1436,15 @@ def fill_receiver_form(driver, receiver_data, weight_data, dimensions_data):
     try:
         # Map our data keys to actual ELTA receiver field IDs (confirmed from debug dump)
         id_map = {
-            "Όνομα":        "RecipientFirstName",
-            "Επώνυμο":      "RecipientLastName",
-            "Όνομα Οδού":   "RecipientStreetName",
-            "Αρ. Οδού":     "RecipientStreetNumber",
-            "Ταχ. Κώδικας": "RecipientPostalCode",
-            "Πόλη":         "RecipientTown",
-            "E-Mail":       "RecipientEmail",
+            "Όνομα":              "RecipientFirstName",
+            "Επώνυμο":            "RecipientLastName",
+            "Όνομα Οδού":         "RecipientStreetName",
+            "Αρ. Οδού":           "RecipientStreetNumber",
+            "Ταχ. Κώδικας":       "RecipientPostalCode",
+            "Πόλη":               "RecipientTown",
+            "E-Mail":             "RecipientEmail",
+            "Οργανισμός":         "RecipientOrganization",
+            "Σημείο παραλαβής":   "RecipientDeliveryPoint",
         }
 
         for label, field_id in id_map.items():
@@ -1294,7 +1461,7 @@ def fill_receiver_form(driver, receiver_data, weight_data, dimensions_data):
         fill_by_id(driver, "VoucherDetailLength", dimensions_data.get("length", "21"))
         fill_by_id(driver, "VoucherDetailWidth",  dimensions_data.get("width", "28"))
         fill_by_id(driver, "VoucherDetailHeight", dimensions_data.get("height", "12"))
-        
+
         # Tick the "Δώρο" (Gift) checkbox
         try:
             gift_cb = driver.find_element(By.ID, "VoucherDetailGift")
@@ -1303,13 +1470,13 @@ def fill_receiver_form(driver, receiver_data, weight_data, dimensions_data):
             print("✓ Checked gift checkbox (VoucherDetailGift)")
         except Exception as e:
             print(f"⚠ Could not check gift checkbox: {e}")
-        
+
         print("✓ Completed receiver data form")
 
     except Exception as e:
         print(f"Error filling receiver form: {str(e)}")
         safe_screenshot(driver, "receiver_form_error.png")
-        
+
         wait_for_user("Please fill in the receiver data manually, then click OK.")
 
 def fill_content_description(driver, country=''):
@@ -1403,7 +1570,11 @@ def rename_latest_pdf(last_name, first_name, tracking_number):
         date_str = datetime.date.today().strftime("%d_%m_%y")
         new_name = f"{surname}_{name}_{date_str}.pdf"
         new_path = os.path.join(OUTPUT_DIR, new_name)
-        os.rename(latest_pdf, new_path)
+        # Remove destination first if it exists (avoids FileExistsError same customer same day)
+        if os.path.exists(new_path):
+            os.remove(new_path)
+        import shutil
+        shutil.move(latest_pdf, new_path)
         print(f"✓ PDF saved as: {new_name}  →  {OUTPUT_DIR}")
     except Exception as e:
         print(f"⚠ Could not rename PDF: {e}")
@@ -1411,7 +1582,7 @@ def rename_latest_pdf(last_name, first_name, tracking_number):
 def print_shipping_label(driver, record):
     """Print the shipping label and extract tracking number"""
     print("Processing final screen and printing label...")
-    
+
     first_name = record.get('first_name', 'UNKNOWN')
     last_name  = record.get('last_name',  'UNKNOWN')
 
@@ -1475,12 +1646,12 @@ def fill_field(driver, field_label, value):
         print(f"✓ Filled {field_label}: {value}")
     except Exception as e:
         print(f"Error finding field for {field_label}: {str(e)}")
-        
+
         # Try alternative approach with JavaScript
         try:
             # Get all inputs and look for nearby labels
             all_inputs = driver.find_elements(By.TAG_NAME, "input")
-            
+
             for inp in all_inputs:
                 label_for_input = None
                 try:
@@ -1497,7 +1668,7 @@ def fill_field(driver, field_label, value):
                     """, inp, field_label)
                 except:
                     pass
-                
+
                 if label_for_input and label_for_input.strip() == field_label.strip():
                     # Found the right input
                     inp.clear()
@@ -1546,34 +1717,53 @@ def find_and_click_next_button(driver, step=None, quiet=False):
 
 # Main execution block
 if __name__ == "__main__":
-    print("Starting main execution block...")
+    print("ELTA Weblabeling 4.4 — starting...")
     try:
         # 1. Pick the orders file
         filepath = ask_for_orders_file()
 
-        # 2. Ask what to do
+        # 2. Load all orders
+        all_records = load_orders_from_html(filepath)
+        if not all_records:
+            raise SystemExit("No orders found in file.")
+
+        # Add weight/dimension defaults
+        default_values = {
+            "weight_kg": "0,49", "length_cm": "21",
+            "width_cm": "28", "height_cm": "12", "customs_qty": "2"
+        }
+        for r in all_records:
+            for k, v in default_values.items():
+                r.setdefault(k, v)
+
+        # 3. Selection table — user ticks which orders to process
+        selected = show_order_selection(all_records)
+        if not selected:
+            raise SystemExit("No orders selected.")
+        print(f"✓ {len(selected)} order(s) selected.")
+
+        # 4. What to do: labels + letters / labels only / letters only
         mode = ask_mode()
 
         if mode == 'letters':
-            # Letters-only: no browser needed
-            records = load_orders_from_html(filepath)
-            # Filter out USA if desired (USA orders rarely get thank-you notes via ELTA)
-            non_usa = [r for r in records if r.get('ship_country', '') not in USA_COUNTRY_VALUES]
-            print(f"\nGenerating thank-you letters for {len(non_usa)} record(s)...")
-            for record in non_usa:
+            # Letters-only: no browser needed, no review screen needed
+            print(f"\nGenerating thank-you letters for {len(selected)} record(s)...")
+            for record in selected:
                 try:
                     generate_thank_you(record)
                 except Exception as e:
                     print(f"⚠ Letter failed for {record.get('full_name', '?')}: {e}")
             print("\nDone. Letters saved to", OUTPUT_DIR)
         else:
-            # Labels (+ optional letters)
-            include_usa = ask_yes_no("Shall I create labels for USA orders too?")
-
+            # Labels (+ optional letters): show review & edit screen first
             root = tk.Tk()
-            app = EltaShippingApp(root, filepath=filepath, include_usa=include_usa, mode=mode)
+            EltaShippingApp(root, selected, mode)
             root.mainloop()
-            print("Mainloop finished")
+            # EltaShippingApp.start_processing() calls process_elta_labels() after root.destroy()
+            print("Processing finished.")
+
+    except SystemExit as e:
+        print(str(e))
     except Exception as e:
         print(f"Error occurred: {e}")
         import traceback

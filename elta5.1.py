@@ -1,12 +1,14 @@
 """
-ELTA Weblabeling & Shipping CRM — v5.0
+ELTA Weblabeling & Shipping CRM — v5.3
 Features:
   - Product catalog with unique SKUs (WIG-001, WIG-002 …)
-  - Customer order history (CRM)
+  - Auto-SKU resolution: fuzzy title match + confirm dialog (same item / new item)
+  - Auto-save dims/weight/customs value to catalog per SKU
+  - Customer CRM: returning customer dialog with stored vs new address comparison
+  - Keep / Update (session only) / Update + Save to DB options
   - Historical import mode (data only, no labels)
   - Carrier selection per order: ELTA or FedEx
   - FedEx batch CSV export
-  - Auto-fill dims/weight/value from catalog
 """
 
 from selenium import webdriver
@@ -16,6 +18,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import Select
 from selenium.webdriver.common.keys import Keys
 import time, random, json, os, re, datetime, csv, unicodedata
+from difflib import SequenceMatcher
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import requests
@@ -117,6 +120,118 @@ def find_sku_for_title(catalog, etsy_title):
     if sku and sku in catalog["skus"]:
         return sku, catalog["skus"][sku]
     return None, None
+
+def find_similar_skus(catalog, etsy_title, threshold=0.55):
+    """Return list of (score, sku, entry) for titles similar to etsy_title, sorted best first."""
+    query = etsy_title.strip().lower()
+    seen  = set()
+    results = []
+    for sku, entry in catalog["skus"].items():
+        best = 0.0
+        for title in entry.get("etsy_titles", []):
+            s = SequenceMatcher(None, query, title.strip().lower()).ratio()
+            best = max(best, s)
+        s = SequenceMatcher(None, query, entry.get("name", "").lower()).ratio()
+        best = max(best, s)
+        if best >= threshold and sku not in seen:
+            results.append((best, sku, entry))
+            seen.add(sku)
+    results.sort(reverse=True)
+    return results
+
+def ask_similar_or_new(catalog, etsy_title, similar_skus):
+    """
+    Dialog: is the new Etsy title the same product as an existing SKU, or a new product?
+    Returns (sku, entry).
+    """
+    result = [None, None]
+    root = tk.Tk(); root.title("New Product — Match?")
+    root.attributes('-topmost', True); root.geometry("680x380"); root.resizable(True, True)
+
+    tk.Label(root, text="New Etsy title:", font=('Arial', 10, 'bold'),
+             pady=6, padx=12, anchor='w').pack(fill='x')
+    tk.Label(root, text=etsy_title[:120], font=('Arial', 10), fg='#2980b9',
+             padx=16, wraplength=640, anchor='w').pack(fill='x')
+    tk.Label(root, text="Similar products in catalog — is it the same?",
+             font=('Arial', 10, 'bold'), pady=8, padx=12, anchor='w').pack(fill='x')
+
+    lf = tk.Frame(root); lf.pack(fill=tk.BOTH, expand=True, padx=12)
+    cols = ('SKU', 'Name', 'Match %', 'Weight', 'Dims (LxWxH)')
+    tree = ttk.Treeview(lf, columns=cols, show='headings', height=6)
+    tree.column('SKU',          width=70,  anchor='w',      stretch=False)
+    tree.column('Name',         width=280, anchor='w')
+    tree.column('Match %',      width=70,  anchor='center', stretch=False)
+    tree.column('Weight',       width=65,  anchor='center', stretch=False)
+    tree.column('Dims (LxWxH)', width=110, anchor='center', stretch=False)
+    for c in cols: tree.heading(c, text=c)
+    sb = ttk.Scrollbar(lf, orient='vertical', command=tree.yview)
+    tree.configure(yscrollcommand=sb.set); sb.pack(side=tk.RIGHT, fill=tk.Y)
+    tree.pack(fill=tk.BOTH, expand=True)
+
+    for score, sku, entry in similar_skus:
+        dims = f"{entry.get('length_cm','')}×{entry.get('width_cm','')}×{entry.get('height_cm','')}"
+        tree.insert('', 'end', iid=sku, values=(
+            sku, entry.get('name', '')[:50], f"{score:.0%}",
+            entry.get('weight_kg', ''), dims,
+        ))
+    if similar_skus:
+        tree.selection_set(similar_skus[0][1])
+
+    bf = tk.Frame(root); bf.pack(fill='x', padx=12, pady=8)
+
+    def use_selected():
+        sel = tree.selection()
+        if not sel:
+            messagebox.showwarning("No selection",
+                                   "Select a product from the list or click 'New Product'.")
+            return
+        sku   = sel[0]
+        entry = catalog["skus"][sku]
+        link_title_to_sku(catalog, sku, etsy_title)
+        result[0] = sku; result[1] = entry; root.destroy()
+
+    def new_product():
+        sku, entry = register_new_sku(catalog, name=etsy_title[:60],
+                                      etsy_title=etsy_title,
+                                      weight='', length='', width='', height='', value='')
+        print(f"✓ New SKU auto-created: {sku}")
+        result[0] = sku; result[1] = entry; root.destroy()
+
+    tk.Button(bf, text="✓ Same product (use selected)", command=use_selected,
+              bg='#27ae60', fg='white', font=('Arial', 10, 'bold'),
+              relief='flat', padx=12, pady=5).pack(side=tk.LEFT, padx=4)
+    tk.Button(bf, text="+ Different product (new SKU)", command=new_product,
+              bg='#2980b9', fg='white', font=('Arial', 10, 'bold'),
+              relief='flat', padx=12, pady=5).pack(side=tk.LEFT, padx=4)
+
+    root.update_idletasks()
+    w, h = root.winfo_reqwidth(), root.winfo_reqheight()
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    root.geometry(f"+{(sw-w)//2}+{(sh-h)//2}")
+    root.grab_set(); root.mainloop()
+    return result[0], result[1]
+
+def auto_resolve_sku(catalog, etsy_title):
+    """
+    Resolve or create a SKU for an Etsy title:
+      - Exact match → return existing SKU silently
+      - Fuzzy match → ask user (same product or different?)
+      - No match    → auto-create new SKU silently
+    Returns (sku, entry).
+    """
+    if not etsy_title:
+        return None, None
+    sku, entry = find_sku_for_title(catalog, etsy_title)
+    if sku:
+        return sku, entry
+    similar = find_similar_skus(catalog, etsy_title, threshold=0.55)
+    if similar:
+        return ask_similar_or_new(catalog, etsy_title, similar)
+    sku, entry = register_new_sku(catalog, name=etsy_title[:60],
+                                  etsy_title=etsy_title,
+                                  weight='', length='', width='', height='', value='')
+    print(f"✓ New SKU auto-created: {sku} — {etsy_title[:50]}")
+    return sku, entry
 
 def register_new_sku(catalog, name, etsy_title, weight, length, width, height, value):
     """Create a new SKU entry. Returns (sku, entry)."""
@@ -419,10 +534,94 @@ def ask_yes_no(question):
     root.grab_set(); root.mainloop()
     return result[0]
 
+def show_customer_update_dialog(record, stored):
+    """
+    Show stored vs incoming address. Returns (action, save_to_db):
+      action = 'keep'  → use stored address
+      action = 'new'   → use incoming address
+      save_to_db = True → persist the new address to the customer DB
+    """
+    FIELDS = [
+        ('street_1',      'Street'),
+        ('street_number', 'Number'),
+        ('street_2',      'Street 2'),
+        ('ship_city',     'City'),
+        ('ship_state',    'State'),
+        ('ship_zipcode',  'ZIP'),
+        ('ship_country',  'Country'),
+        ('phone',         'Phone'),
+    ]
+    has_diff = any(
+        str(stored.get(f, '') or '') != str(record.get(f, '') or '')
+        for f, _ in FIELDS
+    )
+    result = ['keep', False]
+
+    root = tk.Tk(); root.title("Returning Customer")
+    root.attributes('-topmost', True); root.resizable(True, True)
+
+    name   = record.get('full_name', '')
+    orders = stored.get('total_orders', 0)
+    spent  = stored.get('total_spent', 0.0)
+
+    tk.Label(root, text=f"Returning customer: {name}",
+             font=('Arial', 12, 'bold'), pady=10, padx=16).pack(anchor='w')
+    tk.Label(root, text=f"Past orders: {orders}   Total spent: €{spent:.2f}",
+             font=('Arial', 10), fg='#555', padx=16).pack(anchor='w')
+
+    if has_diff:
+        tk.Label(root, text="Address differences (highlighted):",
+                 font=('Arial', 10, 'bold'), pady=6, padx=16).pack(anchor='w')
+        gf = tk.Frame(root, padx=16); gf.pack(fill='x', pady=4)
+        for col, text in enumerate(("Field", "Stored", "New (from Etsy)")):
+            tk.Label(gf, text=text, width=14 if col==0 else 30,
+                     font=('Arial', 9, 'bold'), anchor='w').grid(
+                         row=0, column=col, padx=4, sticky='w')
+        for i, (field, label) in enumerate(FIELDS, start=1):
+            sv  = str(stored.get(field, '') or '')
+            nv  = str(record.get(field, '') or '')
+            chg = sv != nv
+            bg  = '#fff3cd' if chg else '#f8f9fa'
+            tk.Label(gf, text=label, width=14, anchor='w', bg=bg,
+                     font=('Arial', 9)).grid(row=i, column=0, padx=4, pady=1, sticky='ew')
+            tk.Label(gf, text=sv[:38], width=30, anchor='w', bg=bg,
+                     font=('Arial', 9)).grid(row=i, column=1, padx=4, pady=1, sticky='ew')
+            tk.Label(gf, text=nv[:38], width=30, anchor='w', bg=bg,
+                     font=('Arial', 9, 'bold') if chg else ('Arial', 9)).grid(
+                         row=i, column=2, padx=4, pady=1, sticky='ew')
+    else:
+        tk.Label(root, text="Address matches stored data — no differences.",
+                 font=('Arial', 10), fg='#27ae60', padx=16, pady=8).pack(anchor='w')
+
+    bf = tk.Frame(root); bf.pack(fill='x', padx=16, pady=12)
+
+    def keep_stored():   result[0]='keep'; result[1]=False; root.destroy()
+    def new_session():   result[0]='new';  result[1]=False; root.destroy()
+    def new_and_save():  result[0]='new';  result[1]=True;  root.destroy()
+
+    tk.Button(bf, text="Keep stored address", command=keep_stored,
+              bg='#27ae60', fg='white', font=('Arial', 10, 'bold'),
+              relief='flat', padx=10, pady=5).pack(side=tk.LEFT, padx=4)
+    if has_diff:
+        tk.Button(bf, text="Use new (this shipment only)", command=new_session,
+                  bg='#e67e22', fg='white', font=('Arial', 10, 'bold'),
+                  relief='flat', padx=10, pady=5).pack(side=tk.LEFT, padx=4)
+        tk.Button(bf, text="Use new + Save to DB", command=new_and_save,
+                  bg='#c0392b', fg='white', font=('Arial', 10, 'bold'),
+                  relief='flat', padx=10, pady=5).pack(side=tk.LEFT, padx=4)
+
+    root.update_idletasks()
+    w, h = root.winfo_reqwidth(), root.winfo_reqheight()
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    root.geometry(f"+{(sw-w)//2}+{(sh-h)//2}")
+    root.grab_set(); root.mainloop()
+    return result[0], result[1]
+
+
 def ask_run_mode():
     """Returns 'live' or 'historical'."""
     result = ['live']
-    root = tk.Tk(); root.title("ELTA 5.0 — Mode")
+    root = tk.Tk(); root.title("ELTA 5.3 — Mode")
     root.attributes('-topmost', True); root.resizable(False, False)
     tk.Label(root, text="Choose processing mode:",
              font=('Arial', 13, 'bold'), pady=16, padx=20).pack()
@@ -475,7 +674,7 @@ def ask_mode():
 
 def show_order_selection(records):
     selected = []
-    root = tk.Tk(); root.title("ELTA 5.0 — Order Selection")
+    root = tk.Tk(); root.title("ELTA 5.3 — Order Selection")
     root.attributes('-topmost', True); root.geometry("1150x580"); root.resizable(True, True)
 
     tk.Label(root, text="Select orders and choose carrier (click Carrier cell to toggle ELTA ↔ FedEx):",
@@ -578,6 +777,12 @@ def show_order_selection(records):
               bg='#c0392b',fg='white',font=('Arial',10,'bold'),relief='flat',padx=10,pady=5).pack(side=tk.LEFT,padx=4)
     tk.Button(bf, text="Toggle USA",    command=toggle_usa,
               bg='#e67e22',fg='white',font=('Arial',10,'bold'),relief='flat',padx=10,pady=5).pack(side=tk.LEFT,padx=4)
+    tk.Button(bf, text="Customers", command=lambda: CustomerListWindow(root),
+              bg='#8e44ad', fg='white', font=('Arial',10,'bold'),
+              relief='flat', padx=10, pady=5).pack(side=tk.LEFT, padx=4)
+    tk.Button(bf, text="Products",  command=lambda: ProductCatalogWindow(root),
+              bg='#16a085', fg='white', font=('Arial',10,'bold'),
+              relief='flat', padx=10, pady=5).pack(side=tk.LEFT, padx=4)
     tk.Label(bf, textvariable=count_var, font=('Arial',10),fg='#333').pack(side=tk.LEFT,padx=16)
     tk.Button(bf, text="▶  Continue",  command=proceed,
               bg='#2980b9',fg='white',font=('Arial',11,'bold'),relief='flat',padx=18,pady=6).pack(side=tk.RIGHT,padx=6)
@@ -711,6 +916,306 @@ def ask_sku(catalog, etsy_title="", current_sku=""):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# CUSTOMER LIST & PRODUCT CATALOG WINDOWS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class CustomerListWindow:
+    def __init__(self, parent):
+        self.win = tk.Toplevel(parent)
+        self.win.title("Customers")
+        self.win.geometry("940x600")
+        self.win.attributes('-topmost', True)
+        self._build()
+        self._load()
+
+    def _build(self):
+        top = tk.Frame(self.win); top.pack(fill=tk.X, padx=10, pady=6)
+        tk.Label(top, text="Search:", font=('Arial', 10)).pack(side=tk.LEFT)
+        self.search_var = tk.StringVar()
+        tk.Entry(top, textvariable=self.search_var, width=32,
+                 font=('Arial', 10)).pack(side=tk.LEFT, padx=6)
+        self.search_var.trace_add('write', lambda *_: self._load())
+        tk.Button(top, text="Edit", command=self._edit,
+                  bg='#2980b9', fg='white', font=('Arial', 10, 'bold'),
+                  relief='flat', padx=12, pady=4, cursor='hand2').pack(side=tk.RIGHT, padx=4)
+
+        tf = tk.Frame(self.win); tf.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
+        cols = ('Name', 'Email', 'Country', 'City', 'Orders', 'Spent')
+        self.tree = ttk.Treeview(tf, columns=cols, show='headings')
+        self.tree.column('Name',    width=200, anchor='w')
+        self.tree.column('Email',   width=195, anchor='w')
+        self.tree.column('Country', width=110, anchor='w',      stretch=False)
+        self.tree.column('City',    width=130, anchor='w',      stretch=False)
+        self.tree.column('Orders',  width=60,  anchor='center', stretch=False)
+        self.tree.column('Spent',   width=82,  anchor='center', stretch=False)
+        for c in cols: self.tree.heading(c, text=c)
+        sb = ttk.Scrollbar(tf, orient='vertical', command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree.pack(fill=tk.BOTH, expand=True)
+        self.tree.bind('<Double-1>', lambda e: self._edit())
+
+        self.count_lbl = tk.Label(self.win, text="", font=('Arial', 9), fg='#555')
+        self.count_lbl.pack(anchor='w', padx=12, pady=(2, 6))
+
+    def _load(self):
+        self.tree.delete(*self.tree.get_children())
+        db = load_customer_db()
+        ft = self.search_var.get().strip().lower()
+        rows = []
+        for key, c in db.items():
+            name    = c.get('full_name') or key
+            email   = c.get('email', '')
+            country = c.get('ship_country', '')
+            city    = c.get('ship_city', '')
+            orders  = c.get('total_orders', 0)
+            spent   = c.get('total_spent', 0.0)
+            if ft and ft not in name.lower() and ft not in email.lower() \
+                   and ft not in country.lower() and ft not in city.lower():
+                continue
+            rows.append((key, name, email, country, city, orders, spent))
+        rows.sort(key=lambda r: r[1].lower())
+        for key, name, email, country, city, orders, spent in rows:
+            self.tree.insert('', 'end', iid=key, values=(
+                name, email, country, city, orders, f"€{spent:.2f}"))
+        self.count_lbl.config(text=f"{len(rows)} customer(s)")
+
+    def _edit(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("No selection", "Select a customer first.",
+                                   parent=self.win); return
+        key = sel[0]
+        db  = load_customer_db()
+        if key in db:
+            CustomerEditDialog(self.win, key, db[key], on_save=self._load)
+
+
+class CustomerEditDialog:
+    _FIELDS = [
+        ('full_name',     'Full Name'),
+        ('first_name',    'First Name'),
+        ('last_name',     'Last Name'),
+        ('email',         'Email'),
+        ('phone',         'Phone'),
+        ('street_1',      'Street'),
+        ('street_number', 'Number'),
+        ('street_2',      'Street 2'),
+        ('ship_city',     'City'),
+        ('ship_state',    'State'),
+        ('ship_zipcode',  'ZIP'),
+        ('ship_country',  'Country'),
+    ]
+
+    def __init__(self, parent, key, data, on_save=None):
+        self.win     = tk.Toplevel(parent)
+        self.key     = key
+        self.data    = dict(data)
+        self.on_save = on_save
+        self.win.title(f"Edit — {data.get('full_name', key)}")
+        self.win.geometry("680x660")
+        self.win.attributes('-topmost', True)
+        self._build()
+        self.win.grab_set()
+
+    def _build(self):
+        af = ttk.LabelFrame(self.win, text="  Address & Contact  ", padding="8")
+        af.pack(fill=tk.X, padx=12, pady=(10, 4))
+        self.entries = {}
+        for i, (field, label) in enumerate(self._FIELDS):
+            r, col = divmod(i, 2)
+            tk.Label(af, text=label + ':', width=14, anchor='w',
+                     font=('Arial', 9)).grid(row=r, column=col*2,
+                                             padx=(8, 2), pady=2, sticky='w')
+            e = tk.Entry(af, width=28, font=('Arial', 9))
+            e.insert(0, self.data.get(field, '') or '')
+            e.grid(row=r, column=col*2+1, padx=(0, 12), pady=2, sticky='w')
+            self.entries[field] = e
+
+        orders = self.data.get('orders', [])
+        total_spent = self.data.get('total_spent', 0.0)
+        hf = ttk.LabelFrame(
+            self.win,
+            text=(f"  Order History  —  {len(orders)} order(s)"
+                  f"  •  €{total_spent:.2f} total  "),
+            padding="4")
+        hf.pack(fill=tk.BOTH, expand=True, padx=12, pady=4)
+        hi = tk.Frame(hf); hi.pack(fill=tk.BOTH, expand=True)
+        cols = ('Date', 'Product', 'Price', 'Carrier', 'Tracking')
+        ht = ttk.Treeview(hi, columns=cols, show='headings', height=4)
+        ht.column('Date',     width=88,  anchor='w',      stretch=False)
+        ht.column('Product',  width=240, anchor='w')
+        ht.column('Price',    width=70,  anchor='center', stretch=False)
+        ht.column('Carrier',  width=70,  anchor='center', stretch=False)
+        ht.column('Tracking', width=120, anchor='w',      stretch=False)
+        for c in cols: ht.heading(c, text=c)
+        hsb = ttk.Scrollbar(hi, orient='vertical', command=ht.yview)
+        ht.configure(yscrollcommand=hsb.set)
+        hsb.pack(side=tk.RIGHT, fill=tk.Y)
+        ht.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        for o in reversed(orders):
+            prod  = (o.get('product_name') or o.get('sku') or '—')[:45]
+            price = f"€{o.get('value_eur')}" if o.get('value_eur') else '—'
+            ht.insert('', 'end', values=(
+                o.get('date', ''), prod, price,
+                o.get('carrier', 'ELTA'), o.get('tracking', '')))
+
+        bf = tk.Frame(self.win); bf.pack(fill=tk.X, padx=12, pady=8)
+        tk.Button(bf, text="Save", command=self._save,
+                  bg='#27ae60', fg='white', font=('Arial', 10, 'bold'),
+                  relief='flat', padx=14, pady=5).pack(side=tk.LEFT, padx=4)
+        tk.Button(bf, text="Cancel", command=self.win.destroy,
+                  bg='#95a5a6', fg='white', font=('Arial', 10, 'bold'),
+                  relief='flat', padx=14, pady=5).pack(side=tk.LEFT, padx=4)
+
+    def _save(self):
+        db = load_customer_db()
+        if self.key not in db:
+            self.win.destroy(); return
+        for field, e in self.entries.items():
+            db[self.key][field] = e.get().strip()
+        save_customer_db(db)
+        if self.on_save: self.on_save()
+        self.win.destroy()
+
+
+class ProductCatalogWindow:
+    def __init__(self, parent):
+        self.win = tk.Toplevel(parent)
+        self.win.title("Product Catalog")
+        self.win.geometry("860x500")
+        self.win.attributes('-topmost', True)
+        self._build()
+        self._load()
+
+    def _build(self):
+        top = tk.Frame(self.win); top.pack(fill=tk.X, padx=10, pady=6)
+        tk.Label(top, text="Search:", font=('Arial', 10)).pack(side=tk.LEFT)
+        self.search_var = tk.StringVar()
+        tk.Entry(top, textvariable=self.search_var, width=28,
+                 font=('Arial', 10)).pack(side=tk.LEFT, padx=6)
+        self.search_var.trace_add('write', lambda *_: self._load())
+        tk.Button(top, text="Edit", command=self._edit,
+                  bg='#2980b9', fg='white', font=('Arial', 10, 'bold'),
+                  relief='flat', padx=12, pady=4, cursor='hand2').pack(side=tk.RIGHT, padx=4)
+
+        tf = tk.Frame(self.win); tf.pack(fill=tk.BOTH, expand=True, padx=10, pady=4)
+        cols = ('SKU', 'Name', 'Weight', 'Dims (LxWxH)', 'Value', 'Shipped', 'Last Shipped')
+        self.tree = ttk.Treeview(tf, columns=cols, show='headings')
+        self.tree.column('SKU',          width=70,  anchor='w',      stretch=False)
+        self.tree.column('Name',         width=255, anchor='w')
+        self.tree.column('Weight',       width=65,  anchor='center', stretch=False)
+        self.tree.column('Dims (LxWxH)', width=110, anchor='center', stretch=False)
+        self.tree.column('Value',        width=65,  anchor='center', stretch=False)
+        self.tree.column('Shipped',      width=65,  anchor='center', stretch=False)
+        self.tree.column('Last Shipped', width=95,  anchor='center', stretch=False)
+        for c in cols: self.tree.heading(c, text=c)
+        sb = ttk.Scrollbar(tf, orient='vertical', command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tree.pack(fill=tk.BOTH, expand=True)
+        self.tree.bind('<Double-1>', lambda e: self._edit())
+
+        self.count_lbl = tk.Label(self.win, text="", font=('Arial', 9), fg='#555')
+        self.count_lbl.pack(anchor='w', padx=12, pady=(2, 6))
+
+    def _load(self):
+        self.tree.delete(*self.tree.get_children())
+        catalog = load_catalog()
+        ft    = self.search_var.get().strip().lower()
+        count = 0
+        for sku, e in sorted(catalog["skus"].items()):
+            name = e.get('name', '')
+            if ft and ft not in sku.lower() and ft not in name.lower():
+                continue
+            dims = f"{e.get('length_cm','')}×{e.get('width_cm','')}×{e.get('height_cm','')}"
+            val  = f"€{e.get('value_eur')}" if e.get('value_eur') else '—'
+            self.tree.insert('', 'end', iid=sku, values=(
+                sku, name, e.get('weight_kg', ''), dims, val,
+                e.get('times_shipped', 0),
+                e.get('last_shipped', '—') or '—',
+            ))
+            count += 1
+        self.count_lbl.config(text=f"{count} product(s)")
+
+    def _edit(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("No selection", "Select a product first.",
+                                   parent=self.win); return
+        sku     = sel[0]
+        catalog = load_catalog()
+        if sku in catalog["skus"]:
+            ProductEditDialog(self.win, sku, catalog["skus"][sku], on_save=self._load)
+
+
+class ProductEditDialog:
+    _FIELDS = [
+        ('name',      'Name',        46),
+        ('weight_kg', 'Weight (kg)', 12),
+        ('length_cm', 'Length (cm)', 12),
+        ('width_cm',  'Width (cm)',  12),
+        ('height_cm', 'Height (cm)', 12),
+        ('value_eur', 'Value (€)',   12),
+    ]
+
+    def __init__(self, parent, sku, data, on_save=None):
+        self.win     = tk.Toplevel(parent)
+        self.sku     = sku
+        self.data    = dict(data)
+        self.on_save = on_save
+        self.win.title(f"Edit Product — {sku}")
+        self.win.geometry("500x430")
+        self.win.attributes('-topmost', True)
+        self._build()
+        self.win.grab_set()
+
+    def _build(self):
+        ff = ttk.LabelFrame(self.win, text=f"  {self.sku}  ", padding="10")
+        ff.pack(fill=tk.X, padx=14, pady=(12, 4))
+        self.entries = {}
+        for i, (field, label, width) in enumerate(self._FIELDS):
+            tk.Label(ff, text=label + ':', width=14, anchor='w',
+                     font=('Arial', 10)).grid(row=i, column=0, padx=6, pady=3, sticky='w')
+            e = tk.Entry(ff, width=width, font=('Arial', 10))
+            e.insert(0, self.data.get(field, '') or '')
+            e.grid(row=i, column=1, padx=6, pady=3, sticky='w')
+            self.entries[field] = e
+
+        titles = self.data.get('etsy_titles', [])
+        if titles:
+            tf = ttk.LabelFrame(self.win, text="  Etsy Titles (linked)  ", padding="6")
+            tf.pack(fill=tk.X, padx=14, pady=4)
+            for t in titles[:6]:
+                tk.Label(tf, text=f"• {t[:80]}", font=('Arial', 9), fg='#555',
+                         anchor='w').pack(fill='x', padx=4)
+
+        tk.Label(self.win,
+                 text=(f"Shipped {self.data.get('times_shipped', 0)} time(s)  •  "
+                       f"Last: {self.data.get('last_shipped', '—') or '—'}"),
+                 font=('Arial', 9), fg='#888').pack(anchor='w', padx=14, pady=(4, 0))
+
+        bf = tk.Frame(self.win); bf.pack(fill=tk.X, padx=14, pady=10)
+        tk.Button(bf, text="Save", command=self._save,
+                  bg='#27ae60', fg='white', font=('Arial', 10, 'bold'),
+                  relief='flat', padx=14, pady=5).pack(side=tk.LEFT, padx=4)
+        tk.Button(bf, text="Cancel", command=self.win.destroy,
+                  bg='#95a5a6', fg='white', font=('Arial', 10, 'bold'),
+                  relief='flat', padx=14, pady=5).pack(side=tk.LEFT, padx=4)
+
+    def _save(self):
+        catalog = load_catalog()
+        if self.sku not in catalog["skus"]:
+            self.win.destroy(); return
+        entry = catalog["skus"][self.sku]
+        for field, _, _ in self._FIELDS:
+            entry[field] = self.entries[field].get().strip()
+        save_catalog(catalog)
+        if self.on_save: self.on_save()
+        self.win.destroy()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # REVIEW & EDIT SCREEN  (EltaShippingApp — with SKU + carrier awareness)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -727,8 +1232,18 @@ class EltaShippingApp:
         self.shipping_data   = []
         self.current_index   = 0
 
-        self.root.title("ELTA 5.0 — Review & Edit")
+        self.root.title("ELTA 5.3 — Review & Edit")
         self.root.geometry("1020x800")
+
+        # Menu bar
+        menubar   = tk.Menu(self.root)
+        self.root.config(menu=menubar)
+        data_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="Data", menu=data_menu)
+        data_menu.add_command(label="Customer List",
+                              command=lambda: CustomerListWindow(self.root))
+        data_menu.add_command(label="Product List",
+                              command=lambda: ProductCatalogWindow(self.root))
 
         main_frame = ttk.Frame(root, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
@@ -790,17 +1305,39 @@ class EltaShippingApp:
             e.insert(0, default)
             self.entries[field] = e; row += 1
 
-        # Carrier label (read-only — set in order selection)
+        # Carrier toggle button (click to switch ELTA ↔ FedEx)
         ttk.Label(self.data_frame, text="Carrier:").grid(
             row=row, column=0, sticky=tk.W, padx=5, pady=2)
-        self.carrier_label = tk.Label(self.data_frame, text="ELTA",
-                                      font=('Arial',10,'bold'), fg='#2980b9')
-        self.carrier_label.grid(row=row, column=1, sticky=tk.W, padx=5); row += 1
+        self.carrier_btn = tk.Button(self.data_frame, text="ELTA",
+                                     font=('Arial', 10, 'bold'), fg='white',
+                                     bg='#2980b9', relief='flat', padx=10, pady=2,
+                                     cursor='hand2', command=self._toggle_carrier)
+        self.carrier_btn.grid(row=row, column=1, sticky=tk.W, padx=5); row += 1
 
         self.print_label_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(self.data_frame, text="Print Label?",
                         variable=self.print_label_var).grid(
                             row=row, column=0, columnspan=2, sticky=tk.W, padx=5, pady=8)
+
+        # ── Order History panel ──
+        self.history_frame = ttk.LabelFrame(main_frame, text="  Order History  ", padding="4")
+        self.history_frame.pack(fill=tk.X, padx=10, pady=(0, 4))
+        _hist_inner = tk.Frame(self.history_frame)
+        _hist_inner.pack(fill=tk.X)
+        hist_cols = ('Date', 'Product', 'Price', 'Carrier', 'Tracking')
+        self.hist_tree = ttk.Treeview(_hist_inner, columns=hist_cols,
+                                       show='headings', height=3)
+        self.hist_tree.column('Date',     width=88,  anchor='w',      stretch=False)
+        self.hist_tree.column('Product',  width=280, anchor='w')
+        self.hist_tree.column('Price',    width=72,  anchor='center', stretch=False)
+        self.hist_tree.column('Carrier',  width=72,  anchor='center', stretch=False)
+        self.hist_tree.column('Tracking', width=120, anchor='w',      stretch=False)
+        for _c in hist_cols: self.hist_tree.heading(_c, text=_c)
+        _hist_sb = ttk.Scrollbar(_hist_inner, orient='vertical',
+                                 command=self.hist_tree.yview)
+        self.hist_tree.configure(yscrollcommand=_hist_sb.set)
+        _hist_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.hist_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         nav_frame = ttk.Frame(main_frame); nav_frame.pack(fill=tk.X, padx=10, pady=5)
         ttk.Button(nav_frame, text="◀ Previous", command=self.prev_record).pack(side=tk.LEFT,padx=5)
@@ -820,6 +1357,11 @@ class EltaShippingApp:
         # load_orders called via root.after(50)
 
     def _assign_sku(self):
+        try:
+            if not self.root.winfo_exists():
+                return
+        except Exception:
+            return
         self.save_changes()
         rec         = self.shipping_data[self.current_index] if self.shipping_data else {}
         etsy_title  = rec.get('etsy_title', '')
@@ -846,6 +1388,36 @@ class EltaShippingApp:
                 self.shipping_data[self.current_index]['sku']          = sku
                 self.shipping_data[self.current_index]['product_name'] = entry.get('name','')
 
+    def _toggle_carrier(self):
+        if not self.shipping_data:
+            return
+        rec     = self.shipping_data[self.current_index]
+        carrier = 'FedEx' if rec.get('carrier', 'ELTA') == 'ELTA' else 'ELTA'
+        rec['carrier'] = carrier
+        self.carrier_btn.config(
+            text=carrier,
+            bg='#2980b9' if carrier == 'ELTA' else '#e67e22')
+
+    def _update_history_panel(self, record):
+        self.hist_tree.delete(*self.hist_tree.get_children())
+        db  = load_customer_db()
+        key = customer_db_key(record)
+        if not key or key not in db or not db[key].get('orders'):
+            self.hist_tree.insert('', 'end', values=('—', 'No previous orders', '—', '—', ''))
+            return
+        orders = db[key].get('orders', [])
+        total  = db[key].get('total_orders', len(orders))
+        spent  = db[key].get('total_spent', 0.0)
+        self.history_frame.config(
+            text=f"  Order History  —  {total} order(s)  •  €{spent:.2f} total  ")
+        for o in reversed(orders):
+            prod  = (o.get('product_name') or o.get('sku') or '—')[:50]
+            price = f"€{o.get('value_eur')}" if o.get('value_eur') else '—'
+            self.hist_tree.insert('', 'end', values=(
+                o.get('date', ''), prod, price,
+                o.get('carrier', 'ELTA'), o.get('tracking', ''),
+            ))
+
     def load_orders(self):
         try:
             if self.pre_loaded is not None:
@@ -862,42 +1434,35 @@ class EltaShippingApp:
                 r.setdefault('value_eur', '')
                 r.setdefault('order_date', datetime.date.today().isoformat())
 
-            # Auto-match SKUs from catalog for known Etsy titles
+            # Auto-resolve SKUs for all records (exact → fuzzy dialog → auto-create)
             for r in self.shipping_data:
                 if not r.get('sku') and r.get('etsy_title'):
-                    sku, entry = find_sku_for_title(self.catalog, r['etsy_title'])
-                    if sku:
+                    sku, entry = auto_resolve_sku(self.catalog, r['etsy_title'])
+                    if sku and entry:
                         r['sku']          = sku
-                        r['product_name'] = entry.get('name','')
+                        r['product_name'] = entry.get('name', '')
                         for k in ('weight_kg','length_cm','width_cm','height_cm','value_eur'):
                             if entry.get(k) and not r.get(k):
-                                field_map = {'weight_kg':'weight_kg','length_cm':'length_cm',
-                                             'width_cm':'width_cm','height_cm':'height_cm',
-                                             'value_eur':'value_eur'}
-                                r[field_map[k]] = entry[k]
+                                r[k] = entry[k]
 
-            # Repeat customer check
+            # Returning customer check with full address comparison dialog
             db = load_customer_db()
             for record in self.shipping_data:
                 key = customer_db_key(record)
                 if key and key in db:
                     stored = db[key]
-                    orders = stored.get('orders', [])
-                    addr_summary = (
-                        f"{stored.get('street_1','')} {stored.get('street_number','')}, "
-                        f"{stored.get('ship_zipcode','')} {stored.get('ship_city','')}, "
-                        f"{stored.get('ship_country','')}\n"
-                        f"Total past orders: {stored.get('total_orders',0)}   "
-                        f"Total spent: €{stored.get('total_spent',0):.2f}"
-                    )
-                    if ask_yes_no(
-                        f"Returning customer: {record['full_name']}\n\n"
-                        f"{addr_summary}\n\nUse stored address?"
-                    ):
+                    action, save_to_db = show_customer_update_dialog(record, stored)
+                    if action == 'keep':
                         for field in ('street_1','street_number','street_2',
                                       'ship_city','ship_state','ship_zipcode','ship_country'):
                             if stored.get(field) is not None:
                                 record[field] = stored[field]
+                    elif save_to_db:
+                        for field in ('street_1','street_number','street_2','ship_city',
+                                      'ship_state','ship_zipcode','ship_country','phone'):
+                            if record.get(field):
+                                db[key][field] = record[field]
+                        save_customer_db(db)
 
             if self.shipping_data:
                 self.display_record(0)
@@ -918,9 +1483,10 @@ class EltaShippingApp:
             if v: self.entries[field].insert(0, str(v))
         self.print_label_var.set(rec.get("print_label", True))
         carrier = rec.get('carrier', 'ELTA')
-        self.carrier_label.config(
+        self.carrier_btn.config(
             text=carrier,
-            fg='#2980b9' if carrier=='ELTA' else '#e67e22')
+            bg='#2980b9' if carrier == 'ELTA' else '#e67e22')
+        self._update_history_panel(rec)
         sku   = rec.get('sku', '')
         pname = rec.get('product_name', '')
         self._current_sku   = sku
@@ -940,6 +1506,21 @@ class EltaShippingApp:
         rec["print_label"]   = self.print_label_var.get()
         rec["sku"]           = self._current_sku
         rec["product_name"]  = (self._current_entry or {}).get('name', '')
+        # Auto-save dims/weight/value to catalog whenever they are filled
+        if self._current_sku:
+            entry = self.catalog["skus"].get(self._current_sku)
+            if entry:
+                changed = False
+                for field, cat_key in [('weight_kg','weight_kg'),('length_cm','length_cm'),
+                                        ('width_cm','width_cm'),('height_cm','height_cm'),
+                                        ('value_eur','value_eur')]:
+                    val = (rec.get(field) or '').strip()
+                    if val and val != str(entry.get(cat_key, '')):
+                        entry[cat_key] = val
+                        changed = True
+                if changed:
+                    save_catalog(self.catalog)
+                    print(f"✓ Catalog updated for {self._current_sku}")
 
     def next_record(self):
         if self.current_index < len(self.shipping_data) - 1:
@@ -1003,7 +1584,13 @@ def process_live(elta_records, fedex_records, mode, catalog):
     if mode == 'letters':
         for r in (elta_records or []):
             try:
+                _db_pre = load_customer_db()
+                _key    = customer_db_key(r)
+                is_ret  = (_key and _key in _db_pre and
+                           _db_pre[_key].get("total_orders", 0) > 0)
                 generate_thank_you(r)
+                if is_ret:
+                    generate_thank_you_return(r)
                 upsert_customer(r, sku=r.get('sku',''), carrier='ELTA')
                 if catalog and r.get('sku'):
                     bump_sku_shipment(catalog, r['sku'])
@@ -1127,62 +1714,196 @@ def ask_gender(full_name):
     root.grab_set(); root.mainloop()
     return result[0]
 
+FRENCH_COUNTRIES = {
+    "France", "Belgium", "Switzerland", "Luxembourg", "Monaco",
+}
+
 def generate_thank_you(record):
-    first_name = record.get('first_name','')
-    last_name  = record.get('last_name','')
-    country    = record.get('ship_country','')
+    first_name = record.get('first_name', '')
+    last_name  = record.get('last_name', '')
+    country    = record.get('ship_country', '')
     gender = guess_gender(first_name, country)
-    if gender is None: gender = ask_gender(f"{first_name} {last_name}")
+    if gender is None:
+        gender = ask_gender(f"{first_name} {last_name}")
 
-    if country == "France":
-        salutation = f"Cher M. {last_name}," if gender=='M' else f"Chère Mme. {last_name},"
-        body = (
-            "Nous tenions à exprimer notre profonde gratitude et nos sincères remerciements "
-            "d'avoir choisi notre petite manufacture comme votre destination préférée pour "
-            "l'achat de votre nouvelle perruque.\n\n"
-            "Nous attendons avec impatience vos précieux commentaires et espérons sincèrement "
-            "que la perruque que vous avez choisie surpassera vos attentes.\n\n"
-            "Depuis la belle ville d'Athènes, en Grèce, nous vous adressons nos salutations "
-            "les plus chaleureuses.\n\nCordialement,\nConstantine"
-        )
+    if country in FRENCH_COUNTRIES:
+        if gender == 'M':
+            salutation = f"Cher M. {last_name},"
+        else:
+            salutation = f"Chère Mme {last_name},"
+        body_paras = [
+            "Bienvenue dans notre atelier ! Nous sommes sincèrement ravis que vous nous ayez choisis pour votre achat, et c'est un véritable honneur de contribuer à donner vie à votre vision créative.",
+            "Chaque perruque qui quitte notre atelier est le fruit d'années de savoir-faire, de soin et de dévouement. Nous espérons que votre nouvelle pièce apportera exactement la touche qu'il faut à votre représentation, production ou événement — et que la porter sera aussi spécial que l'occasion pour laquelle elle a été créée.",
+            "Si vous avez des questions, souhaitez partager votre expérience ou avez besoin d'ajustements, n'hésitez pas à nous contacter. Vos retours ne sont pas seulement les bienvenus — ils sont véritablement précieux et nous aident à continuer à progresser.",
+            "Merci encore de nous avoir fait confiance. Ce sont des clients comme vous qui donnent tout son sens à notre travail, et nous espérons sincèrement avoir l'occasion de créer quelque chose ensemble à nouveau dans le futur.",
+        ]
+        closing  = "Avec nos chaleureuses salutations,"
+        gap_lines = 2
+
     elif country in SPANISH_COUNTRIES:
-        salutation = f"Estimado Sr. {last_name}," if gender=='M' else f"Estimada Sra. {last_name},"
-        body = (
-            "¡Bienvenido a nuestra manufactura de pelucas! Estamos verdaderamente encantados "
-            "de que nos haya elegido para su compra.\n\n"
-            "Si desea compartir algo sobre su experiencia, no dude en comunicarse con nosotros. "
-            "Muchas gracias nuevamente por confiar en nosotros.\n\n"
-            "Cordialmente,\nConstantine"
-        )
+        if gender == 'M':
+            salutation  = f"Estimado señor {last_name},"
+            bienvenidox = "¡Bienvenido a nuestro atelier! Estamos verdaderamente encantados de que nos haya elegido para su compra, y es un auténtico honor contribuir a dar vida a su visión creativa."
+        else:
+            salutation  = f"Estimada señora {last_name},"
+            bienvenidox = "¡Bienvenida a nuestro atelier! Estamos verdaderamente encantados de que nos haya elegido para su compra, y es un auténtico honor contribuir a dar vida a su visión creativa."
+        body_paras = [
+            bienvenidox,
+            "Cada peluca que sale de nuestro taller es el resultado de años de oficio, cuidado y dedicación. Esperamos que su nueva pieza aporte exactamente el toque adecuado a su actuación, producción o evento — y que llevarla sea tan especial como la ocasión para la que fue creada.",
+            "Si tiene alguna pregunta, desea compartir su experiencia o necesita algún ajuste, no dude en ponerse en contacto con nosotros. Sus comentarios no solo son bienvenidos — son genuinamente valiosos y nos ayudan a seguir creciendo y mejorando.",
+            "Gracias de nuevo por confiar en nosotros. Son clientes como usted quienes dan sentido a este trabajo, y esperamos con ilusión la posibilidad de crear algo juntos de nuevo en el futuro.",
+        ]
+        closing   = "Con un cordial saludo,"
+        gap_lines = 1
+
     else:
-        salutation = f"Dear Mr. {last_name}," if gender=='M' else f"Dear Ms. {last_name},"
-        body = (
-            "Welcome to our wig manufactory! We're truly delighted that you've chosen us for "
-            "your purchase. We hope your new wig adds the perfect touch to your performance or event.\n\n"
-            "If there's anything you'd like to share about your experience, please don't hesitate "
-            "to reach out. Thank you for trusting us.\n\n"
-            "Warm regards,\nConstantine"
-        )
+        if gender == 'M':
+            salutation = f"Dear Mr. {last_name},"
+        else:
+            salutation = f"Dear Ms. {last_name},"
+        body_paras = [
+            "Welcome to our atelier! We are truly delighted that you have chosen us for your purchase, and it is a genuine honor to play a part in bringing your creative vision to life.",
+            "Every wig that leaves our workshop is the result of years of craft, care, and dedication. We hope your new piece adds exactly the right touch to your performance, production, or event — and that wearing it feels as special as the occasion it was made for.",
+            "Should you have any questions, wish to share your experience, or need any adjustments, please do not hesitate to reach out. Your feedback is not just welcome — it is genuinely valued and helps us continue to grow and improve.",
+            "Thank you once again for trusting us with your needs. It is customers like you who make this work meaningful, and we very much look forward to the possibility of creating something together again in the future.",
+        ]
+        closing   = "With warm regards,"
+        gap_lines = 2
 
-    doc   = OpenDocumentText()
-    style = Style(name="LetterBody", family="paragraph")
-    style.addElement(ParagraphProperties(marginbottom="0.75cm", textalign="justify"))
-    style.addElement(TextProperties(fontsize="12pt", fontfamily="Liberation Sans"))
-    doc.styles.addElement(style)
+    # Build ODT
+    doc = OpenDocumentText()
 
-    def add_para(text):
-        p = P(stylename="LetterBody"); p.addText(text); doc.text.addElement(p)
+    style_body = Style(name="LBody", family="paragraph")
+    style_body.addElement(ParagraphProperties(textalign="justify"))
+    style_body.addElement(TextProperties(
+        fontname="Linux Libertine Display G",
+        fontsize="14pt",
+        fontsizeasian="14pt",
+        fontsizecomplex="14pt",
+    ))
+    doc.styles.addElement(style_body)
 
-    add_para(salutation); add_para("")
-    for para in body.split("\n\n"):
-        for line in para.split("\n"): add_para(line)
-        add_para("")
+    style_blank = Style(name="LBlank", family="paragraph")
+    style_blank.addElement(ParagraphProperties(textalign="justify"))
+    style_blank.addElement(TextProperties(
+        fontname="Linux Libertine Display G",
+        fontsize="14pt",
+        fontsizeasian="14pt",
+        fontsizecomplex="14pt",
+    ))
+    doc.styles.addElement(style_blank)
+
+    def add_para(text, style="LBody"):
+        p = P(stylename=style)
+        p.addText(text)
+        doc.text.addElement(p)
+
+    def add_blank():
+        add_para("", "LBlank")
+
+    add_para(salutation)
+    add_blank()
+    for i, para in enumerate(body_paras):
+        add_para(para)
+        if i < len(body_paras) - 1:
+            add_blank()
+    for _ in range(gap_lines):
+        add_blank()
+    add_para(closing)
+    add_blank()
+    add_para("Constantine")
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     date_str = datetime.date.today().strftime("%d_%m_%y")
     filename = f"{last_name.upper()}_{first_name.upper()}_{date_str}_thankyou.odt"
     doc.save(os.path.join(OUTPUT_DIR, filename))
     print(f"✓ Thank-you letter: {filename}")
+
+
+def generate_thank_you_return(record):
+    """Generate a 'welcome back' letter for returning customers."""
+    first_name = record.get('first_name', '')
+    last_name  = record.get('last_name', '')
+    country    = record.get('ship_country', '')
+    gender = guess_gender(first_name, country)
+    if gender is None:
+        gender = ask_gender(f"{first_name} {last_name}")
+
+    if country in FRENCH_COUNTRIES:
+        salutation = (f"Cher M. {last_name}," if gender == 'M'
+                      else f"Chère Mme {last_name},")
+        body_paras = [
+            "Nous sommes profondément touchés de vous retrouver parmi nous. Les clients qui reviennent sont la raison d'être de cet atelier, et savoir que notre travail a une nouvelle fois mérité votre confiance est pour nous une source de fierté sincère.",
+            "Nous espérons que cette nouvelle pièce vous apportera la même satisfaction qu'auparavant — et qu'elle ajoutera exactement la touche qu'il faut à l'occasion que vous avez en tête.",
+            "Comme toujours, si vous souhaitez des ajustements ou souhaitez simplement nous faire part de votre expérience, n'hésitez pas à nous contacter. Vous êtes toujours le bienvenu ici." if gender == 'M' else
+            "Comme toujours, si vous souhaitez des ajustements ou souhaitez simplement nous faire part de votre expérience, n'hésitez pas à nous contacter. Vous êtes toujours la bienvenue ici.",
+        ]
+        closing   = "Avec nos chaleureuses salutations,"
+        gap_lines = 2
+
+    elif country in SPANISH_COUNTRIES:
+        salutation = (f"Estimado señor {last_name}," if gender == 'M'
+                      else f"Estimada señora {last_name},")
+        volver = ("Nos alegra enormemente volver a verle."
+                  if gender == 'M' else "Nos alegra enormemente volver a verla.")
+        body_paras = [
+            volver + " Los clientes que regresan son la razón de ser de este taller, y saber que nuestro trabajo ha merecido de nuevo su confianza nos llena de verdadero orgullo.",
+            "Esperamos que esta nueva pieza le brinde la misma satisfacción que antes — y que llevarla añada exactamente el toque adecuado a la ocasión que tiene en mente.",
+            "Como siempre, si necesita algún ajuste o simplemente desea contarnos cómo fue, no dude en ponerse en contacto con nosotros. Siempre es bienvenido aquí." if gender == 'M' else
+            "Como siempre, si necesita algún ajuste o simplemente desea contarnos cómo fue, no dude en ponerse en contacto con nosotros. Siempre es bienvenida aquí.",
+        ]
+        closing   = "Con un cordial saludo,"
+        gap_lines = 1
+
+    else:
+        salutation = (f"Dear Mr. {last_name}," if gender == 'M'
+                      else f"Dear Ms. {last_name},")
+        body_paras = [
+            "It means a great deal to us to see you return. Customers who come back are the reason this workshop exists, and knowing that our work has earned your trust again fills us with genuine pride.",
+            "We hope this new piece brings you the same satisfaction as before — and that wearing it adds exactly the right touch to whatever occasion you have in mind.",
+            "As always, if you need any adjustments or simply wish to share how it went, please do not hesitate to reach out. You are always welcome here.",
+        ]
+        closing   = "With warm regards,"
+        gap_lines = 2
+
+    doc = OpenDocumentText()
+
+    style_body = Style(name="LBody", family="paragraph")
+    style_body.addElement(ParagraphProperties(textalign="justify"))
+    style_body.addElement(TextProperties(
+        fontname="Linux Libertine Display G", fontsize="14pt",
+        fontsizeasian="14pt", fontsizecomplex="14pt",
+    ))
+    doc.styles.addElement(style_body)
+
+    style_blank = Style(name="LBlank", family="paragraph")
+    style_blank.addElement(ParagraphProperties(textalign="justify"))
+    style_blank.addElement(TextProperties(
+        fontname="Linux Libertine Display G", fontsize="14pt",
+        fontsizeasian="14pt", fontsizecomplex="14pt",
+    ))
+    doc.styles.addElement(style_blank)
+
+    def add_para(text, style="LBody"):
+        p = P(stylename=style); p.addText(text); doc.text.addElement(p)
+
+    def add_blank():
+        add_para("", "LBlank")
+
+    add_para(salutation); add_blank()
+    for i, para in enumerate(body_paras):
+        add_para(para)
+        if i < len(body_paras) - 1:
+            add_blank()
+    for _ in range(gap_lines): add_blank()
+    add_para(closing); add_blank()
+    add_para("Constantine")
+
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    date_str = datetime.date.today().strftime("%d_%m_%y")
+    filename = f"{last_name.upper()}_{first_name.upper()}_{date_str}_thankyou_return.odt"
+    doc.save(os.path.join(OUTPUT_DIR, filename))
+    print(f"✓ Return thank-you letter: {filename}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1218,20 +1939,24 @@ def fill_visible_field(driver, field_label, value):
         print(f"⚠ fill_visible_field '{field_label}': {e}"); return False
 
 def find_and_click_next_button(driver, step=None, quiet=False):
-    selector = 'button.btn-next:not([data-step])' if (step is None or step==1) \
-               else f'button.btn-next[data-step="{step}"]'
+    # Try data-step="1" first (current ELTA site), fall back to :not([data-step])
+    selectors = ([f'button.btn-next[data-step="{step}"]', 'button.btn-next:not([data-step])']
+                 if (step is None or step == 1)
+                 else [f'button.btn-next[data-step="{step}"]'])
     human_delay(0.4, 0.8)
-    try:
-        btn = WebDriverWait(driver, 10).until(
-            EC.element_to_be_clickable((By.CSS_SELECTOR, selector)))
-        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
-        human_delay(0.2, 0.4)
-        driver.execute_script("arguments[0].click();", btn)
-        print(f"✓ Clicked btn-next (step={step or 1})"); return True
-    except Exception as e:
-        print(f"⚠ btn-next step={step or 1}: {e}")
-        if not quiet: wait_for_user("Please click Επόμενο manually, then click Done.")
-        return False
+    for sel in selectors:
+        try:
+            btn = WebDriverWait(driver, 6).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, sel)))
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+            human_delay(0.2, 0.4)
+            driver.execute_script("arguments[0].click();", btn)
+            print(f"✓ Clicked btn-next (step={step or 1})"); return True
+        except Exception:
+            continue
+    print(f"⚠ btn-next step={step or 1}: not found")
+    if not quiet: wait_for_user("Please click Επόμενο manually, then click Done.")
+    return False
 
 def select_country_and_service(driver, country="United States"):
     country = COUNTRY_NAME_MAP.get(country, country)
@@ -1340,7 +2065,7 @@ def rename_latest_pdf(last_name, first_name):
         new_name = f"{last_name.upper()}_{first_name.upper()}_{date_str}.pdf"
         new_path = os.path.join(OUTPUT_DIR, new_name)
         dl = "D:\\Downloads"
-        for search_dir in [OUTPUT_DIR, dl]:
+        for search_dir in [dl, OUTPUT_DIR]:
             if not os.path.isdir(search_dir):
                 continue
             pdfs = [os.path.join(search_dir, f) for f in os.listdir(search_dir)
@@ -1385,7 +2110,8 @@ def process_all_records(shipping_records, driver, generate_letters=True, catalog
         if index > 0:
             try:
                 btn = WebDriverWait(driver,10).until(EC.element_to_be_clickable((By.XPATH,
-                    "//a[contains(text(),'Νέα αποστολή')]|//button[contains(text(),'Νέα αποστολή')]")))
+                    "//a[contains(text(),'Νέα αποστολή') or contains(text(),'Δημιουργ')]"
+                    "|//button[contains(text(),'Νέα αποστολή') or contains(text(),'Δημιουργ')]")))
                 human_delay(0.5,1.5); btn.click()
                 WebDriverWait(driver,15).until(lambda d: len(d.find_elements(
                     By.XPATH,"//div[contains(@class,'load')]"))==0)
@@ -1427,6 +2153,12 @@ def process_all_records(shipping_records, driver, generate_letters=True, catalog
                 human_delay(1,2)
             tracking = print_shipping_label(driver, record)
 
+            # Check returning customer BEFORE upserting
+            _db_pre      = load_customer_db()
+            _key         = customer_db_key(record)
+            is_returning = (_key and _key in _db_pre and
+                            _db_pre[_key].get("total_orders", 0) > 0)
+
             # Save to customer DB
             upsert_customer(record, sku=record.get('sku',''),
                             carrier='ELTA', tracking=tracking)
@@ -1434,7 +2166,10 @@ def process_all_records(shipping_records, driver, generate_letters=True, catalog
                 bump_sku_shipment(catalog, record['sku'])
 
             if generate_letters:
-                try: generate_thank_you(record)
+                try:
+                    generate_thank_you(record)
+                    if is_returning:
+                        generate_thank_you_return(record)
                 except Exception as e: print(f"⚠ Letter error: {e}")
 
         except Exception as e:
@@ -1505,7 +2240,7 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com",
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    print("ELTA Weblabeling & CRM — v5.0")
+    print("ELTA Weblabeling & CRM — v5.3")
     try:
         filepath    = ask_for_orders_file()
         all_records = load_orders_from_html(filepath)

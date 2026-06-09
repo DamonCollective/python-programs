@@ -733,7 +733,7 @@ def ask_yes_no(question):
     root.grab_set(); root.mainloop()
     return result[0]
 
-def show_customer_update_dialog(record, stored):
+def show_customer_update_dialog(record, stored, parent=None):
     """
     Show stored vs incoming address. Returns (action, save_to_db):
       action = 'keep'  → use stored address
@@ -756,7 +756,12 @@ def show_customer_update_dialog(record, stored):
     )
     result = ['keep', False]
 
-    root = tk.Tk(); root.title("Returning Customer")
+    if parent:
+        root = tk.Toplevel(parent)
+        root.transient(parent)
+    else:
+        root = tk.Tk()
+    root.title("Returning Customer")
     root.attributes('-topmost', True); root.resizable(True, True)
 
     name   = record.get('full_name', '')
@@ -813,7 +818,11 @@ def show_customer_update_dialog(record, stored):
     w, h = root.winfo_reqwidth(), root.winfo_reqheight()
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
     root.geometry(f"+{(sw-w)//2}+{(sh-h)//2}")
-    root.grab_set(); root.mainloop()
+    root.grab_set()
+    if parent:
+        parent.wait_window(root)
+    else:
+        root.mainloop()
     return result[0], result[1]
 
 
@@ -1909,11 +1918,12 @@ class EltaShippingApp:
                     key = customer_db_key(record)
                     if key and key in db:
                         stored = db[key]
-                        action, save_to_db = show_customer_update_dialog(record, stored)
+                        action, save_to_db = show_customer_update_dialog(record, stored, parent=self.root)
                         if action == 'keep':
                             for field in ('street_1','street_number','street_2',
-                                          'ship_city','ship_state','ship_zipcode','ship_country'):
-                                if stored.get(field) is not None:
+                                          'ship_city','ship_state','ship_zipcode','ship_country',
+                                          'phone'):
+                                if stored.get(field):
                                     record[field] = stored[field]
                         elif save_to_db:
                             for field in ('street_1','street_number','street_2','ship_city',

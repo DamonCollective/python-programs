@@ -2548,7 +2548,7 @@ def fill_customs_declaration(driver, record):
         print(f"Customs error: {e}")
         wait_for_user("Please fill customs declaration manually, then click Done.")
 
-def rename_latest_pdf(last_name, first_name):
+def rename_latest_pdf(last_name, first_name, min_time=None):
     try:
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         date_str = datetime.date.today().strftime("%d_%m_%y")
@@ -2563,6 +2563,8 @@ def rename_latest_pdf(last_name, first_name):
             if not pdfs:
                 continue
             latest = max(pdfs, key=os.path.getmtime)
+            if min_time is not None and os.path.getmtime(latest) < min_time:
+                print(f"⚠ PDF found but it predates the print action — download likely failed"); return None
             for _ in range(20):
                 size1 = os.path.getsize(latest); time.sleep(1)
                 if os.path.getsize(latest) == size1: break
@@ -2581,12 +2583,13 @@ def print_shipping_label(driver, record):
         btn = WebDriverWait(driver,15).until(
             EC.element_to_be_clickable((By.ID,"printVoucher")))
         human_delay(0.5,1.5)
+        click_time = time.time()
         driver.execute_script("arguments[0].click();",btn)
         print("✓ Print button clicked")
         human_delay(4,6)
         m = re.search(r'[A-Z]{2}\d{9}[A-Z]{2}', driver.page_source)
         if m: tracking = m.group(0); print(f"✓ Tracking: {tracking}")
-        rename_latest_pdf(last_name, first_name)
+        rename_latest_pdf(last_name, first_name, min_time=click_time)
         human_delay(1,2)
     except Exception as e:
         print(f"Print error: {e}")

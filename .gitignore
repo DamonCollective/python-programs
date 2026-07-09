@@ -2,3 +2,6 @@
 __pycache__/
 *.pyc
 github_token.txt
+credentials_*.json
+token_*.json
+*.xlsx

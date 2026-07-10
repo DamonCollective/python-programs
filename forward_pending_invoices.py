@@ -5,6 +5,9 @@ Searches both Gmail accounts from 1/1/2026 till today.
 For each pending invoice, tries to locate the matching email by invoice number (AA).
 """
 
+import truststore
+truststore.inject_into_ssl()
+
 import os
 import base64
 import calendar
@@ -15,6 +18,8 @@ from email.mime.base import MIMEBase
 from email.mime.text import MIMEText
 from email import encoders
 
+import httplib2
+import google_auth_httplib2
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -155,9 +160,16 @@ def load_pending_invoices(excel_path: str) -> list[dict]:
 
 
 def search_for_invoice(service, account_email: str, inv: dict, search_before: str) -> list[dict]:
-    """Search for a single invoice by its AA number across the date range."""
+    """Search for invoice by AA number within ±14 days of the invoice date."""
     aa = inv["aa"]
-    query = f'after:{SEARCH_FROM} before:{search_before} "{aa}"'
+    try:
+        inv_date = datetime.datetime.strptime(inv["date"], "%d/%m/%Y").date()
+        after  = (inv_date - datetime.timedelta(days=14)).strftime("%Y/%m/%d")
+        before = (inv_date + datetime.timedelta(days=14)).strftime("%Y/%m/%d")
+    except ValueError:
+        after  = SEARCH_FROM
+        before = search_before
+    query = f'after:{after} before:{before} "{aa}"'
     results  = service.users().messages().list(
         userId="me", q=query, maxResults=20
     ).execute()
@@ -206,7 +218,7 @@ def main():
     for p in pending:
         print(f"  • {p['date']}  {p['name'][:40]:<40}  {p['series']} {p['aa']}  {p['value']}€")
 
-    to_email = input("\nΑποστολή προς (email): ").strip()
+    to_email = input("\nΑποστολή προς (email): ").strip().lstrip('﻿')
     if not to_email:
         print("Δεν δόθηκε email. Έξοδος.")
         return
@@ -227,12 +239,13 @@ def main():
             except FileNotFoundError as e:
                 print(f"\n⚠️  {e}\n   Παράλειψη αυτού του λογαριασμού.\n")
 
-        label = "✓" if matches else "✗"
-        print(f"  {label}  {inv['series']} {inv['aa']} ({inv['name'][:35]}) → {len(matches)} email(s)")
+        doc_only = [m for m in matches if m["attachments"]]
+        label = "✓" if doc_only else ("?" if matches else "✗")
+        print(f"  {label}  {inv['series']} {inv['aa']} ({inv['name'][:35]}) → {len(doc_only)} με αρχείο / {len(matches)} συνολικά")
         results.append((inv, matches))
 
-    found_total   = sum(1 for _, m in results if m)
-    missing_total = sum(1 for _, m in results if not m)
+    found_total   = sum(1 for _, m in results if any(x["attachments"] for x in m))
+    missing_total = sum(1 for _, m in results if not any(x["attachments"] for x in m))
 
     print(f"\n{'─'*60}")
     print(f"  Βρέθηκαν: {found_total} | Δεν βρέθηκαν: {missing_total}")
@@ -267,39 +280,29 @@ def main():
     entry_num = 0
 
     for inv, matches in results:
-        if not matches:
+        # keep only emails that have a real document attachment (PDF, XML, etc.)
+        doc_matches = [m for m in matches if m["attachments"]]
+        if not doc_matches:
             continue
         entry_num += 1
         summary_lines.append(
             f"\n{entry_num}. {inv['date']}  {inv['name']}  {inv['series']} {inv['aa']}  {inv['value']}€"
         )
-        for email_match in matches:
+        for email_match in doc_matches:
             summary_lines.append(f"   Email από: {email_match['from']}")
             summary_lines.append(f"   Θέμα: {email_match['subject']}")
             summary_lines.append(f"   Γραμματοκιβώτιο: {email_match['account']}")
-
-            if email_match["attachments"]:
-                names = []
-                for filename, data in email_match["attachments"]:
-                    part = MIMEBase("application", "octet-stream")
-                    part.set_payload(data)
-                    encoders.encode_base64(part)
-                    safe_name = f"{entry_num:02d}_{inv['aa']}_{filename}"
-                    part.add_header("Content-Disposition", "attachment", filename=safe_name)
-                    outer_msg.attach(part)
-                    names.append(safe_name)
-                    attachment_count += 1
-                summary_lines.append(f"   Αρχεία: {', '.join(names)}")
-            else:
-                text_part = MIMEBase("text", "plain")
-                content   = f"From: {email_match['from']}\nSubject: {email_match['subject']}\n\n{email_match['body']}"
-                text_part.set_payload(content.encode("utf-8"))
-                encoders.encode_base64(text_part)
-                safe_name = f"{entry_num:02d}_{inv['aa']}_body.txt"
-                text_part.add_header("Content-Disposition", "attachment", filename=safe_name)
-                outer_msg.attach(text_part)
+            names = []
+            for filename, data in email_match["attachments"]:
+                part = MIMEBase("application", "octet-stream")
+                part.set_payload(data)
+                encoders.encode_base64(part)
+                safe_name = f"{entry_num:02d}_{inv['aa']}_{filename}"
+                part.add_header("Content-Disposition", "attachment", filename=safe_name)
+                outer_msg.attach(part)
+                names.append(safe_name)
                 attachment_count += 1
-                summary_lines.append("   (χωρίς συνημμένο — επισυνάπτεται το κείμενο)")
+            summary_lines.append(f"   Αρχεία: {', '.join(names)}")
 
     outer_msg.attach(MIMEText("\n".join(summary_lines), "plain", "utf-8"))
 
@@ -313,9 +316,15 @@ def main():
         print("Ακυρώθηκε.")
         return
 
-    sending_service = get_service(ACCOUNTS[SENDING_ACCOUNT_INDEX])
-    raw = base64.urlsafe_b64encode(outer_msg.as_bytes()).decode("utf-8")
-    sending_service.users().messages().send(
+    send_account = ACCOUNTS[SENDING_ACCOUNT_INDEX]
+    sending_service = get_service(send_account)
+    creds_obj = Credentials.from_authorized_user_file(send_account["token_file"], SCOPES)
+    authed_http = google_auth_httplib2.AuthorizedHttp(creds_obj, http=httplib2.Http(timeout=300))
+    send_svc = build("gmail", "v1", http=authed_http)
+    msg_bytes = outer_msg.as_bytes()
+    print(f"  Μέγεθος email: {len(msg_bytes)/1024/1024:.1f} MB")
+    raw = base64.urlsafe_b64encode(msg_bytes).decode("utf-8")
+    send_svc.users().messages().send(
         userId="me", body={"raw": raw}
     ).execute()
 

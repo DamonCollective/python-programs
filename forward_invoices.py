@@ -6,6 +6,8 @@ Sends the bundled result from damoncollective@gmail.com.
 """
 
 import os
+import truststore
+truststore.inject_into_ssl()
 import base64
 import calendar
 import datetime
@@ -292,7 +294,7 @@ def main():
     print("  Αυτόματη αποστολή τιμολογίων εξωτερικού")
     print("=" * 55)
 
-    to_email = input("\nΑποστολή προς (email): ").strip()
+    to_email = input("\nΑποστολή προς (email): ").strip().lstrip('﻿')
     if not to_email:
         print("Δεν δόθηκε email. Έξοδος.")
         return

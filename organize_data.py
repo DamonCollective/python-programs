@@ -17,6 +17,33 @@ on-demand full lists:
     3. halloween  - per-item Sep-Oct historical demand (mean, std dev, years
                     observed), to plan what to have pre-made before the
                     mid-August ordering window opens.
+    4. financials - turnover in US$, EUR equivalent (Etsy's own per-transaction
+                    FX rate), and what actually remains after ALL of Etsy's
+                    costs (real bank deposits, not an estimate).
+
+All of the above are also written into a persistent SQLite database
+(etsy_data.db, in the data folder) so that new exports can be dropped into the
+folder later and merged in without re-processing or duplicating history - see
+the 'database' command and DB_NOTES below.
+
+DB_NOTES (how "keep everything, add more later" actually works)
+-----------------------------------------------------------------------------
+Every run of 'database' (or 'all') re-reads whatever CSV/JSON files currently
+sit in the data folder and merges them into etsy_data.db:
+  - Transactional tables (orders, order_items, deposits, checkout_payments)
+    are UPSERTED by their natural key (Order ID / Transaction ID / Payment ID
+    / date+amount+bank-last-4). Rows already in the database are kept; only
+    new or changed rows are added/updated. Nothing is deleted. So you can add
+    a fresh "EtsySoldOrders2026.csv" with more rows in October, re-run, and
+    the database grows - it does not need the old file kept around forever,
+    though there's no harm in keeping it either.
+  - Snapshot tables (listings, reviews, shop_settings) reflect whatever was
+    most recently loaded, since those are "current state" exports, not an
+    append-only log.
+Once built, etsy_data.db can be queried directly with any SQL tool
+(e.g. `sqlite3 etsy_data.db "select * from orders limit 5"`), which is the
+"ask a question, get an accurate answer" part - the tables and column names
+are stable and documented in the loader functions below, not a moving target.
 
 LIMITATIONS (read this before trusting the customer list)
 -----------------------------------------------------------------------------
@@ -40,6 +67,8 @@ Usage
     python organize_data.py customers     # full customer list -> CSV
     python organize_data.py products      # best sellers + stopped-selling items -> CSV
     python organize_data.py halloween     # Sep-Oct per-item demand stats -> CSV
+    python organize_data.py financials    # turnover US$ / EUR / net-after-Etsy
+    python organize_data.py database      # build/update etsy_data.db, no reports
     python organize_data.py all           # everything above
 
 Add  --data-dir "PATH"  to point at a different export folder.
@@ -52,6 +81,7 @@ import argparse
 import glob
 import hashlib
 import os
+import sqlite3
 import sys
 from datetime import timedelta
 
@@ -59,6 +89,7 @@ import pandas as pd
 
 DEFAULT_DATA_DIR = r"D:\Downloads\DATA-ETSY"
 OUTPUT_SUBDIR = "organized_output"
+DB_NAME = "etsy_data.db"
 STOPPED_SELLING_DAYS = 180   # no sale in this many days -> "stopped selling"
 
 pd.set_option("display.width", 160)
@@ -196,6 +227,7 @@ def load_orders(files: list[str]) -> pd.DataFrame:
     df["order_value"] = _to_num(df.get("Order Value"))
     df["order_total"] = _to_num(df.get("Order Total"))
     df["shipping"] = _to_num(df.get("Shipping"))
+    df = df.drop(columns=["Shipping"])  # else clashes with "shipping" in SQLite (case-insensitive)
     df["discount"] = _to_num(df.get("Discount Amount"))
     df["buyer_id"] = df.get("Buyer User ID", "").str.strip()
     df["full_name"] = df.get("Full Name", "").str.strip()
@@ -222,6 +254,7 @@ def load_items(files: list[str]) -> pd.DataFrame:
     df["date"] = _to_date(df.get("Sale Date"), "%m/%d/%y")
     df["qty"] = _to_num(df.get("Quantity"))
     df["price"] = _to_num(df.get("Price"))
+    df = df.drop(columns=["Price"])  # else clashes with "price" in SQLite (case-insensitive)
     df["item_total"] = _to_num(df.get("Item Total"))
     df["listing_id"] = df.get("Listing ID", "").str.strip()
     df["item_name"] = df.get("Item Name", "").str.strip()
@@ -237,6 +270,7 @@ def load_deposits(files: list[str]) -> pd.DataFrame:
     df["amount"] = _to_num(df.get("Amount"))
     df["date"] = _to_date(df.get("Date"))
     df = df.drop_duplicates(subset=["Date", "Amount", "Bank Account Ending Digits"])
+    df = df.drop(columns=["Date", "Amount"])  # else clash with "date"/"amount" in SQLite
     return df[df["date"].notna()].sort_values("date").reset_index(drop=True)
 
 
@@ -249,6 +283,7 @@ def load_checkout_payments(files: list[str]) -> pd.DataFrame:
     for col in ["Gross Amount", "Fees", "Net Amount", "VAT Amount", "Refund Amount"]:
         if col in df:
             df[col.lower().replace(" ", "_")] = _to_num(df[col])
+    df = df.drop(columns=["Fees"])  # else clashes with "fees" in SQLite (case-insensitive)
     df["order_id"] = df.get("Order ID", "").str.strip()
     return df
 
@@ -258,7 +293,130 @@ def load_listings(path: str | None) -> pd.DataFrame:
         return pd.DataFrame()
     df = _read_csv(path)
     df["price"] = _to_num(df.get("PRICE"))
+    df = df.drop(columns=["PRICE"])  # else clashes with "price" in SQLite (case-insensitive)
     return df
+
+
+# --------------------------------------------------------------------------- #
+# 2b. Persistent database  -  "keep everything, add more later, ask questions"
+# --------------------------------------------------------------------------- #
+
+# table -> columns that uniquely identify a row, for upsert-by-key
+TABLE_KEYS = {
+    "orders": ["Order ID"],
+    "order_items": ["Transaction ID"],
+    # NOTE: use the derived lowercase "date"/"amount", not raw "Date"/"Amount" -
+    # those raw columns get folded away by _dedupe_columns_for_sqlite (case-
+    # insensitive clash with the derived columns), so keying on them would
+    # silently break matching on every run after the first.
+    "deposits": ["date", "amount", "Bank Account Ending Digits"],
+    "checkout_payments": ["Payment ID"],
+}
+
+
+def _dedupe_columns_for_sqlite(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    SQLite treats column names as case-insensitive, so a raw CSV column like
+    "Shipping" and our own derived "shipping" collide at CREATE TABLE time even
+    though pandas is fine holding both. Keep the LAST occurrence of any
+    case-insensitive duplicate (our derived/cleaned columns are always added
+    after the raw ones, so this keeps the cleaned version).
+    """
+    seen = {}
+    for i, col in enumerate(df.columns):
+        seen[col.lower()] = i          # later index overwrites earlier
+    keep_idx = sorted(seen.values())
+    return df.iloc[:, keep_idx]
+
+
+def _upsert(conn: sqlite3.Connection, table: str, new_df: pd.DataFrame) -> tuple[int, int]:
+    """
+    Merge new_df into `table`, keyed by TABLE_KEYS[table]. Existing rows are
+    kept; rows with the same key are refreshed with the newest load; brand
+    new rows are added. Nothing already in the table is ever dropped.
+    Returns (rows_before, rows_after).
+    """
+    keys = TABLE_KEYS[table]
+    new_df = new_df.copy()
+    # sqlite3's driver can't bind pandas Timestamp objects - store as ISO text,
+    # same as what comes back out of a round-trip read, so types never clash
+    for col in new_df.columns:
+        if pd.api.types.is_datetime64_any_dtype(new_df[col]):
+            new_df[col] = new_df[col].dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    existing = pd.DataFrame()
+    try:
+        existing = pd.read_sql(f"SELECT * FROM {table}", conn)
+    except (sqlite3.OperationalError, pd.errors.DatabaseError):
+        pass  # table doesn't exist yet - first run
+    before = len(existing)
+
+    # align dtypes as str for the key columns so joins/dedup are exact. Round
+    # any float key first - money values drift by a bit (e.g. 71.96 ->
+    # 71.959999999999999) after a couple of SQLite round-trips, which would
+    # otherwise silently break key matching on the 2nd/3rd run, not the 1st.
+    for df in (existing, new_df):
+        for k in keys:
+            if k in df.columns:
+                if pd.api.types.is_float_dtype(df[k]):
+                    df[k] = df[k].round(2)
+                df[k] = df[k].astype(str)
+
+    combined = pd.concat([existing, new_df], ignore_index=True, sort=False)
+    combined = combined.drop_duplicates(subset=keys, keep="last")
+    combined = _dedupe_columns_for_sqlite(combined)
+    combined.to_sql(table, conn, if_exists="replace", index=False)
+    return before, len(combined)
+
+
+def _replace_snapshot(conn: sqlite3.Connection, table: str, df: pd.DataFrame) -> None:
+    """Snapshot tables (current-state exports) just get overwritten wholesale."""
+    if df.empty:
+        return
+    df = _dedupe_columns_for_sqlite(df)
+    df.to_sql(table, conn, if_exists="replace", index=False)
+
+
+def build_database(data_dir: str, cat: dict) -> sqlite3.Connection:
+    """Load every recognized export and merge it into etsy_data.db."""
+    db_path = os.path.join(data_dir, DB_NAME)
+    conn = sqlite3.connect(db_path)
+
+    orders = load_orders(cat["by_kind"]["orders"])
+    items = load_items(cat["by_kind"]["order_items"])
+    deposits = load_deposits(cat["by_kind"]["deposits"])
+    ccp = load_checkout_payments(cat["by_kind"]["checkout_payments"])
+    listings_files = cat["by_kind"]["listings"]
+    listings = load_listings(listings_files[0] if listings_files else None)
+
+    report = {}
+    if not orders.empty:
+        report["orders"] = _upsert(conn, "orders", orders)
+    if not items.empty:
+        report["order_items"] = _upsert(conn, "order_items", items)
+    if not deposits.empty:
+        report["deposits"] = _upsert(conn, "deposits", deposits)
+    if not ccp.empty:
+        report["checkout_payments"] = _upsert(conn, "checkout_payments", ccp)
+    if not listings.empty:
+        _replace_snapshot(conn, "listings", listings)
+        report["listings"] = (None, len(listings))
+    conn.commit()
+
+    _hr = "-" * 78
+    print(_hr)
+    print(f"DATABASE  -  {db_path}")
+    print(_hr)
+    for table, (before, after) in report.items():
+        if before is None:
+            print(f"  {table:20s} snapshot replaced -> {after:,} rows")
+        elif before == after and before > 0:
+            print(f"  {table:20s} {after:,} rows (no change - nothing new to merge)")
+        else:
+            print(f"  {table:20s} {before:,} -> {after:,} rows "
+                  f"(+{after - before:,} new/updated)")
+    print()
+    return conn
 
 
 # --------------------------------------------------------------------------- #
@@ -494,6 +652,110 @@ def run_halloween(items: pd.DataFrame, out_dir: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# 6. Financials  -  turnover US$, EUR equivalent, net after Etsy's expenses
+# --------------------------------------------------------------------------- #
+
+def build_financials_table(orders: pd.DataFrame, ccp: pd.DataFrame,
+                            deposits: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """
+    Returns (by_year table, all_time dict). See the printed report for how to
+    read each column - the short version:
+      - turnover_usd_*      : what buyers paid, from Sold Orders (accrual, by order date)
+      - eur_gross_etsy_fx   : the same sales converted to EUR at ETSY'S OWN per-
+                              transaction rate (from Checkout Payments), for orders
+                              that are actually in the Sold Orders export (excludes
+                              fully-refunded/cancelled charges)
+      - eur_net_after_etsy  : real EUR that hit the bank (Deposits export) - this
+                              already has EVERY Etsy cost removed (processing fee,
+                              transaction fee, listing fees, any ad spend), because
+                              it's the literal payout amount, not a calculation.
+    CAVEAT: turnover/eur_gross are dated by ORDER date (accrual); deposits are
+    dated by PAYOUT date (cash). Etsy pays out ~1-3 weeks after a sale, so a
+    few thousand EUR near each year boundary shifts into the following year's
+    deposit total. Don't over-read small year-to-year swings at the edges;
+    the all-time totals are unaffected by this timing shift.
+    """
+    matched = ccp[ccp["order_id"].isin(set(orders["Order ID"]))].copy()
+    pay_by_order = matched.set_index("order_id")[["gross_amount", "fees"]]
+    o = orders.set_index("Order ID").join(pay_by_order, how="left")
+    o["year"] = pd.to_datetime(o["date"]).dt.year
+
+    by_year = o.groupby("year").agg(
+        orders=("order_value", "count"),
+        turnover_usd_merch=("order_value", "sum"),
+        turnover_usd_incl_ship=("order_total", "sum"),
+        eur_gross_etsy_fx=("gross_amount", "sum"),
+    )
+    dep_by_year = deposits.groupby(deposits["date"].dt.year)["amount"].sum()
+    by_year["eur_net_after_etsy"] = dep_by_year
+    by_year["etsy_total_cut_%"] = (
+        100 * (1 - by_year["eur_net_after_etsy"] / by_year["eur_gross_etsy_fx"])
+    ).round(1)
+
+    unmatched_orders = o["gross_amount"].isna().sum()
+
+    all_time = {
+        "orders": int(len(o)),
+        "turnover_usd_merch": float(o["order_value"].sum()),
+        "turnover_usd_incl_ship": float(o["order_total"].sum()),
+        "eur_gross_etsy_fx": float(o["gross_amount"].sum()),
+        "eur_net_after_etsy": float(deposits["amount"].sum()),
+        "unmatched_orders_no_payment_row": int(unmatched_orders),
+        "avg_implied_fx_usd_to_eur": float(
+            (matched["gross_amount"] / _to_num(matched["Listing Amount"])).mean()),
+    }
+    all_time["etsy_total_cut_%"] = round(
+        100 * (1 - all_time["eur_net_after_etsy"] / all_time["eur_gross_etsy_fx"]), 1)
+    return by_year, all_time
+
+
+def run_financials(orders: pd.DataFrame, ccp: pd.DataFrame,
+                    deposits: pd.DataFrame, out_dir: str) -> None:
+    if orders.empty or ccp.empty or deposits.empty:
+        print("Missing orders, checkout-payments, or deposits data - "
+              "can't compute financials."); return
+    by_year, all_time = build_financials_table(orders, ccp, deposits)
+
+    path = os.path.join(out_dir, "financials_by_year.csv")
+    by_year.to_csv(path, encoding="utf-8-sig")
+
+    _hr = "-" * 78
+    print(_hr)
+    print("FINANCIALS  -  turnover, EUR equivalent, net after Etsy's expenses")
+    print(_hr)
+    print("turnover_usd_merch    : what buyers paid for merchandise (USD), from Sold Orders")
+    print("turnover_usd_incl_ship: same, plus shipping & tax charged to buyer (USD)")
+    print("eur_gross_etsy_fx     : same sales in EUR, at Etsy's OWN per-transaction FX rate")
+    print("eur_net_after_etsy    : actual EUR deposited to the bank - ALL Etsy costs already")
+    print("                        removed (processing fee, transaction fee, listing fees,")
+    print("                        any ad spend). Not an estimate - it's the real payout.")
+    print("etsy_total_cut_%      : 1 - (net_after_etsy / eur_gross), i.e. Etsy's full bite\n")
+
+    print(by_year.to_string(float_format=lambda v: f"{v:,.2f}"))
+    print(f"\nWrote by-year table -> {path}")
+
+    print("\n>> ALL-TIME (2020-10-10 through most recent data)")
+    print(f"  Orders:                     {all_time['orders']:,}")
+    print(f"  Turnover, merchandise:      US$ {all_time['turnover_usd_merch']:,.2f}")
+    print(f"  Turnover, incl ship/tax:    US$ {all_time['turnover_usd_incl_ship']:,.2f}")
+    print(f"  EUR equivalent (Etsy's FX): EUR {all_time['eur_gross_etsy_fx']:,.2f}"
+          f"   (avg implied rate ~{all_time['avg_implied_fx_usd_to_eur']:.3f} USD->EUR)")
+    print(f"  Net after ALL Etsy costs:   EUR {all_time['eur_net_after_etsy']:,.2f}")
+    print(f"  Etsy's total cut:           {all_time['etsy_total_cut_%']:.1f}%  "
+          f"of the EUR gross amount")
+    if all_time["unmatched_orders_no_payment_row"]:
+        print(f"\n  NOTE: {all_time['unmatched_orders_no_payment_row']} order(s) had no "
+              f"matching Checkout Payments row (excluded from the EUR gross figure "
+              f"above, included in the USD turnover figure) - check these manually.")
+
+    print("\nWhy 'net after Etsy costs' uses Deposits and not a fee calculation:")
+    print("Checkout Payments only shows the payment-PROCESSING fee. Etsy also bills")
+    print("transaction fees, listing fees, and any ad spend separately ('Etsy Bill'),")
+    print("which is not in any file in this folder. The bank deposit is the one number")
+    print("that already has literally everything removed - no assumptions required.")
+
+
+# --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
 
@@ -501,7 +763,8 @@ def main(argv=None) -> None:
     p = argparse.ArgumentParser(description="ClairesWigs Etsy data organizer")
     p.add_argument("--data-dir", default=DEFAULT_DATA_DIR)
     p.add_argument("cmd", nargs="?", default="all",
-                    choices=["catalog", "customers", "products", "halloween", "all"])
+                    choices=["catalog", "customers", "products", "halloween",
+                             "financials", "database", "all"])
     args = p.parse_args(argv)
 
     data_dir = args.data_dir
@@ -514,7 +777,10 @@ def main(argv=None) -> None:
     if args.cmd in ("catalog", "all"):
         print_catalog(data_dir, cat)
 
-    if args.cmd in ("customers", "products", "halloween", "all"):
+    if args.cmd in ("database", "all"):
+        build_database(data_dir, cat)
+
+    if args.cmd in ("customers", "products", "halloween", "financials", "all"):
         orders = load_orders(cat["by_kind"]["orders"])
         items = load_items(cat["by_kind"]["order_items"])
 
@@ -526,6 +792,11 @@ def main(argv=None) -> None:
 
     if args.cmd in ("products", "all"):
         run_products(items, out_dir)
+
+    if args.cmd in ("financials", "all"):
+        deposits = load_deposits(cat["by_kind"]["deposits"])
+        ccp = load_checkout_payments(cat["by_kind"]["checkout_payments"])
+        run_financials(orders, ccp, deposits, out_dir)
 
 
 if __name__ == "__main__":

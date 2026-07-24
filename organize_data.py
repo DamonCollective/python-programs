@@ -10,8 +10,12 @@ export folder, tells you plainly what is and isn't usable, and produces two
 on-demand full lists:
 
     1. customers  - every customer: name, address, order history, what they
-                    bought, when, total spent. (No email/phone: Etsy's bulk
-                    CSV exports do not include them - see LIMITATIONS below.)
+                    bought, when, total spent, and (if --contacts-ods is
+                    given) email - matched by exact Order ID against Kostas's
+                    manually-built contacts file, not a fuzzy name guess.
+                    Etsy's own exports never include email/phone - see
+                    LIMITATIONS below for what that contacts file can and
+                    can't cover.
     2. products   - every item ever sold, ranked by units/revenue, plus which
                     ones sold well and then stopped selling.
     3. halloween  - per-item Sep-Oct historical demand (mean, std dev, years
@@ -88,6 +92,9 @@ from datetime import timedelta
 import pandas as pd
 
 DEFAULT_DATA_DIR = r"D:\Downloads\DATA-ETSY"
+# Kostas's manually-built contacts file - update this constant when he sends a
+# newer version (filenames carry a "(1)", "(2)" etc. suffix from re-downloads).
+DEFAULT_CONTACTS_ODS = r"D:\Downloads\contacts_kostas_1_9(1).ods"
 OUTPUT_SUBDIR = "organized_output"
 DB_NAME = "etsy_data.db"
 STOPPED_SELLING_DAYS = 180   # no sale in this many days -> "stopped selling"
@@ -423,6 +430,45 @@ def build_database(data_dir: str, cat: dict) -> sqlite3.Connection:
 # 3. Customer list  (the "who bought what, when" full list)
 # --------------------------------------------------------------------------- #
 
+def load_contacts_ods(path: str) -> pd.DataFrame:
+    """
+    Load Kostas's manually-built contacts .ods (the 'orders' sheet - it's the
+    order-level source; 'contacts_purged' is just a dedup rollup of the same
+    data, confirmed identical email sets on 2026-07-24, so it adds nothing).
+
+    Matching is by ORDERID <-> Etsy's own Order ID - an exact numeric match,
+    not a fuzzy name/address guess. Verified on the full file: of 2,325
+    orders that matched, 2,325 had an identical buyer name on both sides (2
+    looked like mismatches at first but were just non-Latin/Japanese names
+    that a naive ASCII name-check couldn't read - manually confirmed identical).
+    21 duplicate ORDERIDs in the sheet were checked and are 0-conflict exact
+    repeats (same email both times), so a plain drop-duplicates is safe.
+    """
+    xls = pd.ExcelFile(path, engine="odf")
+    df = xls.parse("orders")
+    df = df[df["ORDERID"].notna()].copy()
+    df["order_id"] = df["ORDERID"].astype("int64").astype(str)
+    df["email"] = df["EMAIL"].str.strip()
+    df["ordername"] = df["ORDERNAME"]
+    df = df[df["email"] != ""].drop_duplicates(subset=["order_id", "email"])
+    # a genuine conflict (same order_id, different emails) would show up as
+    # >1 row surviving per order_id here - checked at 0 as of 2026-07-24, but
+    # don't silently trust that forever; drop_duplicates(keep="first") below
+    # picks the first if a future file update ever does introduce a conflict.
+    df = df.drop_duplicates(subset=["order_id"], keep="first")
+    return df[["order_id", "email", "ordername"]].reset_index(drop=True)
+
+
+def attach_emails(detail: pd.DataFrame, contacts: pd.DataFrame) -> pd.DataFrame:
+    """Add an 'email' column to the per-item detail table via exact Order ID match."""
+    if detail.empty or contacts.empty:
+        detail = detail.copy() if not detail.empty else detail
+        if not detail.empty:
+            detail["email"] = pd.NA
+        return detail
+    return detail.merge(contacts[["order_id", "email"]], on="order_id", how="left")
+
+
 def build_customer_detail(orders: pd.DataFrame, items: pd.DataFrame) -> pd.DataFrame:
     """One row per item purchased, with full customer/address info attached."""
     if orders.empty or items.empty:
@@ -446,8 +492,18 @@ def build_customer_summary(detail: pd.DataFrame) -> pd.DataFrame:
     """One row per customer: address + order history rollup."""
     if detail.empty:
         return pd.DataFrame()
+    has_email = "email" in detail.columns
     g = detail.groupby("customer_key")
-    summary = pd.DataFrame({
+
+    def email_rollup(s):
+        vals = sorted(set(v for v in s if isinstance(v, str) and v.strip()))
+        if len(vals) == 0:
+            return ""
+        if len(vals) == 1:
+            return vals[0]
+        return "MULTIPLE - CHECK MANUALLY: " + " | ".join(vals)
+
+    cols = {
         "full_name": g["full_name"].first(),
         "street1": g["street1"].first(),
         "street2": g["street2"].first(),
@@ -461,16 +517,30 @@ def build_customer_summary(detail: pd.DataFrame) -> pd.DataFrame:
         "n_items": g["qty"].sum(),
         "total_spent": g["item_total"].sum(),
         "items_bought": g["item_name"].apply(lambda s: "; ".join(sorted(set(s)))),
-    })
+    }
+    if has_email:
+        cols["email"] = g["email"].apply(email_rollup)
+    summary = pd.DataFrame(cols)
     return summary.sort_values("total_spent", ascending=False).reset_index()
 
 
-def run_customers(data_dir: str, orders: pd.DataFrame, items: pd.DataFrame, out_dir: str) -> None:
+def run_customers(data_dir: str, orders: pd.DataFrame, items: pd.DataFrame, out_dir: str,
+                   contacts_ods: str | None = None) -> None:
     detail = build_customer_detail(orders, items)
-    summary = build_customer_summary(detail)
     if detail.empty:
         print("No order/item data loaded - nothing to build a customer list from.")
         return
+
+    contacts = pd.DataFrame()
+    if contacts_ods:
+        if not os.path.isfile(contacts_ods):
+            print(f"WARNING: --contacts-ods file not found: {contacts_ods} - "
+                  f"continuing without email enrichment.")
+        else:
+            contacts = load_contacts_ods(contacts_ods)
+            detail = attach_emails(detail, contacts)
+
+    summary = build_customer_summary(detail)
 
     detail_path = os.path.join(out_dir, "customers_full_detail.csv")
     summary_path = os.path.join(out_dir, "customers_summary.csv")
@@ -480,15 +550,43 @@ def run_customers(data_dir: str, orders: pd.DataFrame, items: pd.DataFrame, out_
     print("=" * 78)
     print("CUSTOMER LIST")
     print("=" * 78)
-    print("NOTE: no email or phone number in this list - Etsy's bulk order CSV")
-    print("exports never include buyer contact info, only name + shipping address.")
+    if contacts.empty:
+        print("NOTE: no email or phone number in this list - Etsy's bulk order CSV")
+        print("exports never include buyer contact info, only name + shipping address.")
+        print("Pass --contacts-ods \"path.ods\" to enrich with emails from Kostas's")
+        print("manually-built contacts file (matched by exact Order ID).")
+    else:
+        with_email = (summary["email"].astype(str).str.strip() != "").sum()
+        conflicts = summary["email"].astype(str).str.startswith("MULTIPLE").sum()
+        matched_orders = detail["order_id"].isin(contacts["order_id"]).sum()
+        missing = detail[~detail["order_id"].isin(contacts["order_id"])]
+        missing_before = 0
+        missing_after = 0
+        if not missing.empty:
+            cutoff = pd.Timestamp("2025-09-01")
+            missing_before = (missing["purchase_date"] < cutoff).sum()
+            missing_after = (missing["purchase_date"] >= cutoff).sum()
+        print(f"Email source: {contacts_ods}")
+        print(f"Matched by exact Order ID: {matched_orders:,} of {len(detail):,} "
+              f"line items ({100*matched_orders/len(detail):.1f}%)")
+        print(f"Customers with an email: {with_email:,} of {len(summary):,}")
+        if conflicts:
+            print(f"WARNING: {conflicts} customer(s) have MORE THAN ONE email on file "
+                  f"across their orders - flagged 'MULTIPLE - CHECK MANUALLY' in the "
+                  f"summary CSV, not auto-picked. Review those by hand.")
+        print(f"Still missing an email: {missing_before + missing_after:,} line items "
+              f"-> {missing_after:,} are orders from 2025-09-01 onward (not yet in the "
+              f"contacts file, per Kostas), {missing_before:,} are older gaps not "
+              f"covered by the contacts file either.")
     print(f"\nUnique customers: {len(summary):,}")
     print(f"Total line-item purchases: {len(detail):,}")
     print(f"\nWrote full detail (1 row per item bought)  -> {detail_path}")
     print(f"Wrote per-customer summary (1 row per buyer) -> {summary_path}")
+    top_cols = ["full_name", "city", "country", "n_orders", "n_items", "total_spent"]
+    if "email" in summary.columns:
+        top_cols.insert(1, "email")
     print("\nTop 10 customers by total spent:")
-    print(summary.head(10)[["full_name", "city", "country", "n_orders",
-                             "n_items", "total_spent"]].to_string(index=False))
+    print(summary.head(10)[top_cols].to_string(index=False, max_colwidth=32))
 
 
 # --------------------------------------------------------------------------- #
@@ -762,6 +860,9 @@ def run_financials(orders: pd.DataFrame, ccp: pd.DataFrame,
 def main(argv=None) -> None:
     p = argparse.ArgumentParser(description="ClairesWigs Etsy data organizer")
     p.add_argument("--data-dir", default=DEFAULT_DATA_DIR)
+    p.add_argument("--contacts-ods", default=DEFAULT_CONTACTS_ODS,
+                    help="Kostas's contacts .ods for email enrichment on the "
+                         "'customers' report. Pass \"\" to skip.")
     p.add_argument("cmd", nargs="?", default="all",
                     choices=["catalog", "customers", "products", "halloween",
                              "financials", "database", "all"])
@@ -785,7 +886,8 @@ def main(argv=None) -> None:
         items = load_items(cat["by_kind"]["order_items"])
 
     if args.cmd in ("customers", "all"):
-        run_customers(data_dir, orders, items, out_dir)
+        run_customers(data_dir, orders, items, out_dir,
+                      contacts_ods=args.contacts_ods or None)
 
     if args.cmd in ("halloween", "all"):
         run_halloween(items, out_dir)

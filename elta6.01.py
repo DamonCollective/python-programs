@@ -1,5 +1,5 @@
 """
-ELTA Weblabeling & Shipping CRM — v6.00
+ELTA Weblabeling & Shipping CRM — v6.01
 Features:
   - Product catalog with unique SKUs (WIG-001, WIG-002 …)
   - Auto-SKU resolution: fuzzy title match + confirm dialog (same item / new item)
@@ -18,6 +18,11 @@ Features:
   - USA orders: pauses at the content-description screen and the customs
     declaration screen so the content/value/HS fields can be checked or
     edited against Zonos' prepaid-tariff numbers before continuing
+  - Multi-item orders: assign more than one product per order, each as an
+    existing catalog SKU, a brand-new catalog SKU, or a one-off description
+    that is never saved to the catalog — fills one ELTA customs line and one
+    FedEx CSV commodity row per item
+  - Assign Products popup auto-sizes to its content (no clipped columns)
 """
 
 from selenium import webdriver
@@ -419,6 +424,22 @@ def bump_sku_shipment(catalog, sku):
         entry["times_shipped"] = entry.get("times_shipped", 0) + 1
         entry["last_shipped"]  = datetime.date.today().isoformat()
         save_catalog(catalog)
+
+def bump_items_shipped(catalog, record):
+    """Bump times_shipped for every catalog SKU in record['items'] (multi-item
+    orders); falls back to record['sku'] for legacy single-item records."""
+    skus = {it.get('sku') for it in record.get('items', []) if it.get('sku')}
+    if not skus and record.get('sku'):
+        skus = {record['sku']}
+    for sku in skus:
+        bump_sku_shipment(catalog, sku)
+
+def _parse_num(value, default=0.0):
+    """Parse a possibly Greek-comma-decimal numeric string; returns default on failure."""
+    try:
+        return float(str(value).strip().replace(',', '.'))
+    except (ValueError, TypeError):
+        return default
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -968,7 +989,7 @@ def open_db_manager():
 def ask_run_mode():
     """Returns 'live', 'historical', 'from_db', or 'db_manager'."""
     result = ['live']
-    root = tk.Tk(); root.title("ELTA 6.00 — Mode")
+    root = tk.Tk(); root.title("ELTA 6.01 — Mode")
     root.attributes('-topmost', True); root.resizable(False, False)
     tk.Label(root, text="Choose processing mode:",
              font=('Arial', 13, 'bold'), pady=16, padx=20).pack()
@@ -1029,7 +1050,7 @@ def ask_mode():
 
 def show_order_selection(records):
     selected = []
-    root = tk.Tk(); root.title("ELTA 6.00 — Order Selection")
+    root = tk.Tk(); root.title("ELTA 6.01 — Order Selection")
     root.attributes('-topmost', True); root.geometry("1150x580"); root.resizable(True, True)
 
     tk.Label(root, text="Select orders and choose carrier (click Carrier cell to toggle ELTA ↔ FedEx):",
@@ -1150,21 +1171,26 @@ def show_order_selection(records):
 # SKU ASSIGNMENT DIALOG
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def ask_sku(catalog, etsy_title="", current_sku="", parent=None):
+def ask_items(catalog, etsy_title="", current_items=None, parent=None):
     """
-    Show a dialog to assign a SKU to an order.
-    Returns (sku, entry) — entry is the catalog dict for that SKU.
+    Show a dialog to assign one or more product items to an order.
+    Each item is either an existing catalog SKU, a brand-new catalog SKU
+    (saved permanently), or a one-off description (this order only — never
+    written to product_catalog.json).
+    Returns a list of item dicts, or None if the user cancelled/skipped.
+    Item dict: {'sku','name','qty','weight_kg','value_eur','is_custom'}
     """
-    result = [None, None]
+    result = [None]
+    items = list(current_items) if current_items else []
 
     if parent and parent.winfo_exists():
         root = tk.Toplevel(parent)
     else:
         root = tk.Tk()
-    root.title("Assign Product / SKU")
-    root.attributes('-topmost', True); root.geometry("600x520"); root.resizable(True, True)
+    root.title("Assign Products to This Order")
+    root.attributes('-topmost', True); root.resizable(True, True)
 
-    tk.Label(root, text="Assign a product SKU to this order",
+    tk.Label(root, text="Assign product(s) to this order",
              font=('Arial',12,'bold'), pady=10).pack()
     if etsy_title:
         tk.Label(root, text=f"Etsy title: {etsy_title[:80]}",
@@ -1180,7 +1206,7 @@ def ask_sku(catalog, etsy_title="", current_sku="", parent=None):
     # SKU list
     lf = tk.Frame(root); lf.pack(fill=tk.BOTH, expand=True, padx=10)
     cols = ('SKU', 'Name', 'Dims (LxWxH)', 'Weight', 'Value', 'Shipped')
-    tree = ttk.Treeview(lf, columns=cols, show='headings', height=10)
+    tree = ttk.Treeview(lf, columns=cols, show='headings', height=8)
     tree.column('SKU',         width=70,  anchor='w', stretch=False)
     tree.column('Name',        width=200, anchor='w')
     tree.column('Dims (LxWxH)',width=100, anchor='center', stretch=False)
@@ -1205,14 +1231,18 @@ def ask_sku(catalog, etsy_title="", current_sku="", parent=None):
                 e.get('weight_kg',''), e.get('value_eur',''),
                 e.get('times_shipped',0),
             ))
-            if sku == current_sku:
-                tree.selection_set(sku)
 
     populate()
     search_var.trace_add('write', lambda *_: populate(search_var.get()))
 
-    # New product form
-    nf = ttk.LabelFrame(root, text="  Create new product  ", padding=8)
+    # Quantity used by whichever "Add" button is pressed
+    qf = tk.Frame(root); qf.pack(fill=tk.X, padx=10, pady=(4,0))
+    tk.Label(qf, text="Qty for next Add:", font=('Arial',9,'bold')).pack(side=tk.LEFT)
+    qty_var = tk.StringVar(value="1")
+    tk.Entry(qf, textvariable=qty_var, width=5, font=('Arial',9)).pack(side=tk.LEFT, padx=6)
+
+    # New product form (saved permanently to the catalog)
+    nf = ttk.LabelFrame(root, text="  Create new product (saved to catalog)  ", padding=8)
     nf.pack(fill=tk.X, padx=10, pady=4)
 
     fields_new = {}
@@ -1232,20 +1262,80 @@ def ask_sku(catalog, etsy_title="", current_sku="", parent=None):
     fields_new["name"].config(width=22)
     if etsy_title: fields_new["name"].insert(0, etsy_title[:50])
 
-    # Buttons
-    bf = tk.Frame(root); bf.pack(fill=tk.X, padx=10, pady=8)
+    # One-off form (this order only — never written to the catalog)
+    of = ttk.LabelFrame(root, text="  One-off item (this order only — not saved to catalog)  ", padding=8)
+    of.pack(fill=tk.X, padx=10, pady=4)
 
-    def select_existing():
+    fields_oneoff = {}
+    oneoff_rows = [
+        ("Description", "name",   30),
+        ("Weight",      "weight", 8),
+        ("Value €",     "value",  8),
+    ]
+    for col, (lbl, key, w) in enumerate(oneoff_rows):
+        tk.Label(of, text=lbl, font=('Arial',9)).grid(row=0,column=col*2,padx=(8,2))
+        e = tk.Entry(of, width=w, font=('Arial',9))
+        e.grid(row=0, column=col*2+1, padx=(0,6))
+        fields_oneoff[key] = e
+    fields_oneoff["name"].config(width=22)
+
+    def copy_selected_to_oneoff():
+        sel = tree.selection()
+        if not sel:
+            messagebox.showwarning("No selection","Select a product first."); return
+        entry = catalog["skus"][sel[0]]
+        fields_oneoff["name"].delete(0, tk.END);   fields_oneoff["name"].insert(0, entry.get('name',''))
+        fields_oneoff["weight"].delete(0, tk.END); fields_oneoff["weight"].insert(0, str(entry.get('weight_kg','')))
+        fields_oneoff["value"].delete(0, tk.END);  fields_oneoff["value"].insert(0, str(entry.get('value_eur','')))
+
+    tk.Button(of, text="✎ Copy selected here to edit", command=copy_selected_to_oneoff,
+              bg='#95a5a6',fg='white',font=('Arial',9),relief='flat',padx=8,pady=2)\
+        .grid(row=1, column=0, columnspan=6, sticky='w', padx=8, pady=(4,0))
+
+    # Items already added to this order
+    itf = ttk.LabelFrame(root, text="  Items in this order  ", padding=8)
+    itf.pack(fill=tk.BOTH, padx=10, pady=4)
+    items_count_var = tk.StringVar()
+    icols = ('SKU', 'Name', 'Qty', 'Weight', 'Value')
+    items_tree = ttk.Treeview(itf, columns=icols, show='headings', height=4)
+    items_tree.column('SKU',    width=70,  anchor='w', stretch=False)
+    items_tree.column('Name',   width=220, anchor='w')
+    items_tree.column('Qty',    width=45,  anchor='center', stretch=False)
+    items_tree.column('Weight', width=65,  anchor='center', stretch=False)
+    items_tree.column('Value',  width=65,  anchor='center', stretch=False)
+    for c in icols: items_tree.heading(c, text=c)
+    items_tree.pack(fill=tk.X)
+    tk.Label(itf, textvariable=items_count_var, font=('Arial',9), fg='#555').pack(anchor='w', pady=(4,0))
+
+    def refresh_items():
+        items_tree.delete(*items_tree.get_children())
+        for i, it in enumerate(items):
+            items_tree.insert('', 'end', iid=str(i), values=(
+                it.get('sku') or 'ONE-OFF', it.get('name','')[:40],
+                it.get('qty','1'), it.get('weight_kg',''), it.get('value_eur',''),
+            ))
+        items_count_var.set(f"{len(items)} item(s) in this order")
+
+    refresh_items()
+
+    # Buttons
+    bf = tk.Frame(root); bf.pack(fill=tk.X, padx=10, pady=4)
+
+    def add_selected():
         sel = tree.selection()
         if not sel:
             messagebox.showwarning("No selection","Please select a product from the list.")
             return
         sku = sel[0]
         entry = catalog["skus"][sku]
-        # Link the etsy_title to this SKU if not already mapped
         if etsy_title:
             link_title_to_sku(catalog, sku, etsy_title)
-        result[0] = sku; result[1] = entry; root.destroy()
+        items.append({
+            'sku': sku, 'name': entry.get('name',''), 'qty': qty_var.get().strip() or '1',
+            'weight_kg': entry.get('weight_kg',''), 'value_eur': entry.get('value_eur',''),
+            'is_custom': False,
+        })
+        refresh_items()
 
     def create_new():
         name   = fields_new["name"].get().strip()
@@ -1258,24 +1348,72 @@ def ask_sku(catalog, etsy_title="", current_sku="", parent=None):
             messagebox.showwarning("Missing","Please enter a product name."); return
         sku, entry = register_new_sku(catalog, name, etsy_title,
                                       weight, length, width, height, value)
-        result[0] = sku; result[1] = entry; root.destroy()
+        items.append({
+            'sku': sku, 'name': name, 'qty': qty_var.get().strip() or '1',
+            'weight_kg': weight, 'value_eur': value, 'is_custom': False,
+        })
+        refresh_items()
+        for e in fields_new.values(): e.delete(0, tk.END)
+        if etsy_title: fields_new["name"].insert(0, etsy_title[:50])
 
-    def skip():
-        root.destroy()
+    def add_oneoff():
+        name   = fields_oneoff["name"].get().strip()
+        weight = fields_oneoff["weight"].get().strip()
+        value  = fields_oneoff["value"].get().strip()
+        if not name:
+            messagebox.showwarning("Missing","Please enter a description."); return
+        items.append({
+            'sku': '', 'name': name, 'qty': qty_var.get().strip() or '1',
+            'weight_kg': weight, 'value_eur': value, 'is_custom': True,
+        })
+        refresh_items()
+        for e in fields_oneoff.values(): e.delete(0, tk.END)
 
-    tk.Button(bf, text="✓ Use Selected",  command=select_existing,
-              bg='#27ae60',fg='white',font=('Arial',10,'bold'),relief='flat',padx=12,pady=5).pack(side=tk.LEFT,padx=4)
-    tk.Button(bf, text="+ Create New",    command=create_new,
-              bg='#2980b9',fg='white',font=('Arial',10,'bold'),relief='flat',padx=12,pady=5).pack(side=tk.LEFT,padx=4)
-    tk.Button(bf, text="Skip",            command=skip,
+    def remove_item():
+        sel = items_tree.selection()
+        if not sel:
+            messagebox.showwarning("No selection","Select an item in the order list first.")
+            return
+        idx = int(sel[0])
+        if 0 <= idx < len(items):
+            items.pop(idx)
+        refresh_items()
+
+    def done():
+        result[0] = list(items); root.destroy()
+
+    def cancel():
+        result[0] = None; root.destroy()
+
+    tk.Button(bf, text="+ Add Selected",  command=add_selected,
+              bg='#27ae60',fg='white',font=('Arial',9,'bold'),relief='flat',padx=8,pady=4).pack(side=tk.LEFT,padx=2)
+    tk.Button(bf, text="+ Add New Product", command=create_new,
+              bg='#2980b9',fg='white',font=('Arial',9,'bold'),relief='flat',padx=8,pady=4).pack(side=tk.LEFT,padx=2)
+    tk.Button(bf, text="+ Add One-off",   command=add_oneoff,
+              bg='#8e44ad',fg='white',font=('Arial',9,'bold'),relief='flat',padx=8,pady=4).pack(side=tk.LEFT,padx=2)
+    tk.Button(bf, text="− Remove Item",   command=remove_item,
+              bg='#c0392b',fg='white',font=('Arial',9,'bold'),relief='flat',padx=8,pady=4).pack(side=tk.LEFT,padx=2)
+
+    bf2 = tk.Frame(root); bf2.pack(fill=tk.X, padx=10, pady=(0,8))
+    tk.Button(bf2, text="✓ Done",  command=done,
+              bg='#27ae60',fg='white',font=('Arial',10,'bold'),relief='flat',padx=12,pady=5).pack(side=tk.RIGHT,padx=4)
+    tk.Button(bf2, text="Cancel",  command=cancel,
               bg='#95a5a6',fg='white',font=('Arial',10,'bold'),relief='flat',padx=12,pady=5).pack(side=tk.RIGHT,padx=4)
+
+    # Auto-size the window to exactly fit its content — no clipped columns,
+    # no leftover blank space — instead of a guessed fixed geometry.
+    root.update_idletasks()
+    w = root.winfo_reqwidth()
+    h = root.winfo_reqheight()
+    sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+    root.geometry(f"{w}x{h}+{max(0,(sw-w)//2)}+{max(0,(sh-h)//2)}")
 
     root.grab_set()
     if isinstance(root, tk.Toplevel):
         root.wait_window()
     else:
         root.mainloop()
-    return result[0], result[1]
+    return result[0]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1682,7 +1820,7 @@ class EltaShippingApp:
         self.shipping_data   = []
         self.current_index   = 0
 
-        self.root.title("ELTA 6.00 — Review & Edit")
+        self.root.title("ELTA 6.01 — Review & Edit")
         self.root.geometry("1020x800")
         try:
             self.root.state('zoomed')   # maximize on Windows
@@ -1828,33 +1966,55 @@ class EltaShippingApp:
         except Exception:
             return
         self.save_changes()
-        rec         = self.shipping_data[self.current_index] if self.shipping_data else {}
-        etsy_title  = rec.get('etsy_title', '')
-        current_sku = rec.get('sku', '')
-        sku, entry  = ask_sku(self.catalog, etsy_title, current_sku, parent=self.root)
-        if sku and entry:
-            self._current_sku   = sku
-            self._current_entry = entry
+        rec        = self.shipping_data[self.current_index] if self.shipping_data else {}
+        etsy_title = rec.get('etsy_title', '')
+        # Backward compat: build a one-item starting list from legacy sku/product_name
+        # fields if this record predates the multi-item 'items' list.
+        current_items = rec.get('items')
+        if current_items is None and rec.get('product_name'):
+            current_items = [{
+                'sku': rec.get('sku',''), 'name': rec.get('product_name',''),
+                'qty': rec.get('customs_qty','1'),
+                'weight_kg': rec.get('weight_kg',''), 'value_eur': rec.get('value_eur',''),
+                'is_custom': not rec.get('sku',''),
+            }]
+        items = ask_items(self.catalog, etsy_title, current_items, parent=self.root)
+        if items is None:
+            return  # cancelled — leave record unchanged
+
+        if not self.shipping_data:
+            return
+        rec['items'] = items
+        if items:
+            rec['product_name'] = " + ".join(it.get('name','') for it in items)
+            rec['sku']          = items[0].get('sku','')           # primary, for legacy lookups/history
+            rec['customs_qty']  = str(sum(int(_parse_num(it.get('qty','1'), 1)) for it in items))
+            self._current_sku   = rec['sku']
+            self._current_entry = self.catalog["skus"].get(rec['sku']) if rec['sku'] else None
+            label = ", ".join(f"{(it.get('sku') or 'one-off')}: {it.get('name','')}" for it in items)
             try:
-                self.sku_label.config(text=f"{sku}  —  {entry.get('name','')}", fg='#27ae60')
-                # Auto-fill dims/weight/value from catalog
-                mapping = {
-                    'weight_kg': entry.get('weight_kg',''),
-                    'length_cm': entry.get('length_cm',''),
-                    'width_cm':  entry.get('width_cm',''),
-                    'height_cm': entry.get('height_cm',''),
-                    'value_eur': entry.get('value_eur',''),
-                }
-                for k, v in mapping.items():
-                    if v and k in self.entries:
-                        self.entries[k].delete(0, tk.END)
-                        self.entries[k].insert(0, str(v))
+                self.sku_label.config(text=label[:70], fg='#27ae60')
+                # Auto-fill package weight/value as the sum across items (dims left as-is —
+                # box dimensions aren't a per-item property)
+                total_weight = sum(_parse_num(it.get('weight_kg','')) for it in items)
+                total_value  = sum(_parse_num(it.get('value_eur',''))  for it in items)
+                if total_weight and 'weight_kg' in self.entries:
+                    self.entries['weight_kg'].delete(0, tk.END)
+                    self.entries['weight_kg'].insert(0, str(round(total_weight, 2)))
+                if total_value and 'value_eur' in self.entries:
+                    self.entries['value_eur'].delete(0, tk.END)
+                    self.entries['value_eur'].insert(0, str(round(total_value, 2)))
             except Exception:
                 pass
-            # Write back to record (always, even if window update fails)
-            if self.shipping_data:
-                self.shipping_data[self.current_index]['sku']          = sku
-                self.shipping_data[self.current_index]['product_name'] = entry.get('name','')
+        else:
+            rec['product_name'] = ''
+            rec['sku']          = ''
+            self._current_sku   = ''
+            self._current_entry = None
+            try:
+                self.sku_label.config(text="— not assigned —", fg='#c0392b')
+            except Exception:
+                pass
 
     def _edit_product(self):
         if not self._current_sku:
@@ -1978,10 +2138,14 @@ class EltaShippingApp:
         self._update_history_panel(rec)
         sku   = rec.get('sku', '')
         pname = rec.get('product_name', '')
+        items = rec.get('items') or []
         self._current_sku   = sku
         self._current_entry = self.catalog["skus"].get(sku) if sku else None
-        if sku:
-            self.sku_label.config(text=f"{sku}  —  {pname}", fg='#27ae60')
+        if len(items) > 1:
+            label = ", ".join(f"{(it.get('sku') or 'one-off')}: {it.get('name','')}" for it in items)
+            self.sku_label.config(text=label[:70], fg='#27ae60')
+        elif sku or pname:
+            self.sku_label.config(text=f"{sku or 'one-off'}  —  {pname}", fg='#27ae60')
         else:
             self.sku_label.config(text="— not assigned —", fg='#c0392b')
         # ELTA effective country — show in orange when it differs from ship_country
@@ -2003,9 +2167,14 @@ class EltaShippingApp:
             rec[field] = self.entries[field].get()
         rec["print_label"]   = self.print_label_var.get()
         rec["sku"]           = self._current_sku
-        rec["product_name"]  = (self._current_entry or {}).get('name', '')
-        # Auto-save dims/weight/value to catalog whenever they are filled
-        if self._current_sku:
+        is_multi = len(rec.get('items') or []) > 1
+        if not is_multi:
+            rec["product_name"] = (self._current_entry or {}).get('name', '')
+        # else: product_name was already set to the combined description in
+        # _assign_sku — the per-order package weight/value entries below are a
+        # SUM across items, so they must never be written back to a single
+        # SKU's shared catalog entry (would corrupt it for future orders).
+        if self._current_sku and not is_multi:
             entry = self.catalog["skus"].get(self._current_sku)
             if entry:
                 changed = False
@@ -2050,8 +2219,7 @@ class EltaShippingApp:
                                 carrier=r.get('carrier','ELTA'),
                                 order_date=r.get('order_date',''),
                                 historical=True)
-                if r.get('sku'):
-                    bump_sku_shipment(self.catalog, r['sku'])
+                bump_items_shipped(self.catalog, r)
             messagebox.showinfo("Done",
                 f"✓ {len(to_process)} records saved to customer DB.\nNo labels generated.")
             self.root.destroy()
@@ -2087,8 +2255,7 @@ def process_live(elta_records, fedex_records, mode, catalog):
                 except Exception as e:
                     print(f"⚠ FedEx letter error: {e}")
             upsert_customer(r, sku=r.get('sku',''), carrier='FedEx')
-            if r.get('sku'):
-                bump_sku_shipment(catalog, r['sku'])
+            bump_items_shipped(catalog, r)
         messagebox.showinfo("FedEx CSV Ready",
             f"✓ {len(fedex_records)} FedEx order(s) exported to:\n{csv_path}")
 
@@ -2103,8 +2270,8 @@ def process_live(elta_records, fedex_records, mode, catalog):
                 if is_ret:
                     generate_thank_you_return(r)
                 upsert_customer(r, sku=r.get('sku',''), carrier='ELTA')
-                if catalog and r.get('sku'):
-                    bump_sku_shipment(catalog, r['sku'])
+                if catalog:
+                    bump_items_shipped(catalog, r)
             except Exception as e:
                 print(f"⚠ Letter error: {e}")
         return
@@ -2139,12 +2306,12 @@ def export_fedex_csv(records, filepath):
             country_name = r.get('ship_country','')
             iso2         = COUNTRY_TO_ISO2.get(country_name, country_name[:2].upper())
             weight_str   = str(r.get('weight_kg','1.2')).replace(',','.')
-            try:    net_weight = str(round(float(weight_str)*0.8, 2))
-            except: net_weight = '0.4'
-            item_desc = (FEDEX_ITEM_PREFIX +
-                         (r.get('product_name') or r.get('etsy_title') or 'Wig'))
-            street1 = f"{r.get('street_1','')} {r.get('street_number','')}".strip()
-            writer.writerow({
+            street1      = f"{r.get('street_1','')} {r.get('street_number','')}".strip()
+
+            # Shipment-level fields — identical on every commodity row for this
+            # shipment. FedEx's batch template groups consecutive rows with
+            # matching shipment fields into one multi-commodity shipment.
+            base_row = {
                 'serviceType':          'INTERNATIONAL_ECONOMY',
                 'shipmentType':         'OUTBOUND',
                 'senderContactName':    SENDER['name'],
@@ -2174,16 +2341,39 @@ def export_fedex_csv(records, filepath):
                 'baseRate':             '',
                 'packageType':          'YOUR_PACKAGING',
                 'currencyType':         'EUR',
-                'commodityType':        'ITEMS',
-                'itemDescription':      item_desc,
                 'manufacturingCountry': 'GR',
-                'commodityQuantity':    r.get('customs_qty','1'),
                 'commodityMeasureUnit': 'PCS',
-                'commodityWeight':      net_weight,
-                'customsValue':         str(r.get('value_eur','')).replace(',','.'),
+                'commodityType':        'ITEMS',
                 'purposeOfShipment':    'SOLD',
                 'generateInvoice':      'CI',
-            })
+            }
+
+            items = r.get('items') or []
+            if not items:
+                # Legacy single-commodity record — unchanged behaviour.
+                try:    net_weight = str(round(float(weight_str)*0.8, 2))
+                except: net_weight = '0.4'
+                item_desc = (FEDEX_ITEM_PREFIX +
+                             (r.get('product_name') or r.get('etsy_title') or 'Wig'))
+                writer.writerow({
+                    **base_row,
+                    'itemDescription':   item_desc,
+                    'commodityQuantity': r.get('customs_qty','1'),
+                    'commodityWeight':   net_weight,
+                    'customsValue':      str(r.get('value_eur','')).replace(',','.'),
+                })
+                continue
+
+            for item in items:
+                item_kg = _parse_num(item.get('weight_kg'), _parse_num(r.get('weight_kg','1.2'), 1.2))
+                item_desc = FEDEX_ITEM_PREFIX + (item.get('name') or r.get('etsy_title') or 'Wig')
+                writer.writerow({
+                    **base_row,
+                    'itemDescription':   item_desc,
+                    'commodityQuantity': item.get('qty') or r.get('customs_qty','1'),
+                    'commodityWeight':   str(round(item_kg*0.8, 2)),
+                    'customsValue':      str(item.get('value_eur','') or '').replace(',','.'),
+                })
     print(f"✓ FedEx CSV saved: {filepath}")
 
 
@@ -2557,15 +2747,37 @@ def fill_customs_declaration(driver, record):
     try:
         WebDriverWait(driver,15).until(
             EC.visibility_of_element_located((By.ID,"CustomsDeclarationDetailedDescriptionOfContents1")))
-        qty       = record.get('customs_qty','2')
-        total_kg  = float(str(record.get('weight_kg','0,49')).replace(',','.'))
-        net_weight= str(round(total_kg*0.8,2)).replace('.',',')
-        fill_by_id(driver,"CustomsDeclarationDetailedDescriptionOfContents1","Carnival Wigs")
-        fill_by_id(driver,"CustomsDeclarationQuantity1",                      qty)
-        fill_by_id(driver,"CustomsDeclarationNetWeight1",                      net_weight)
-        fill_by_id(driver,"CustomsDeclarationValue1",                          "15")
-        fill_by_id(driver,"CustomsDeclarationHSTarifNumber1",                  "9505900014")
-        fill_by_id(driver,"CustomsDeclarationCounryOfOrigionOfGoods1",         "GR")
+
+        items = record.get('items') or []
+        if not items:
+            # Legacy single-line record (no 'items' list) — unchanged behaviour.
+            qty        = record.get('customs_qty','2')
+            total_kg   = float(str(record.get('weight_kg','0,49')).replace(',','.'))
+            net_weight = str(round(total_kg*0.8,2)).replace('.',',')
+            fill_by_id(driver,"CustomsDeclarationDetailedDescriptionOfContents1","Carnival Wigs")
+            fill_by_id(driver,"CustomsDeclarationQuantity1",                      qty)
+            fill_by_id(driver,"CustomsDeclarationNetWeight1",                      net_weight)
+            fill_by_id(driver,"CustomsDeclarationValue1",                          "15")
+            fill_by_id(driver,"CustomsDeclarationHSTarifNumber1",                  "9505900014")
+            fill_by_id(driver,"CustomsDeclarationCounryOfOrigionOfGoods1",         "GR")
+            return
+
+        # One customs line per item. ELTA's form has a fixed number of line
+        # slots — if an order has more items than the page has slots, the
+        # extra fill_by_id calls will just warn and no-op (fill_by_id returns
+        # False on a missing field id instead of raising).
+        for i, item in enumerate(items, start=1):
+            desc      = item.get('name') or 'Carnival Wigs'
+            qty       = item.get('qty') or record.get('customs_qty','1')
+            item_kg   = _parse_num(item.get('weight_kg'), _parse_num(record.get('weight_kg','0,49')))
+            net_weight= str(round(item_kg*0.8,2)).replace('.',',')
+            value     = item.get('value_eur') or '15'
+            fill_by_id(driver,f"CustomsDeclarationDetailedDescriptionOfContents{i}", desc)
+            fill_by_id(driver,f"CustomsDeclarationQuantity{i}",                      qty)
+            fill_by_id(driver,f"CustomsDeclarationNetWeight{i}",                     net_weight)
+            fill_by_id(driver,f"CustomsDeclarationValue{i}",                         value)
+            fill_by_id(driver,f"CustomsDeclarationHSTarifNumber{i}",                 "9505900014")
+            fill_by_id(driver,f"CustomsDeclarationCounryOfOrigionOfGoods{i}",        "GR")
     except Exception as e:
         print(f"Customs error: {e}")
         wait_for_user("Please fill customs declaration manually, then click Done.")
@@ -2689,8 +2901,8 @@ def process_all_records(shipping_records, driver, generate_letters=True, catalog
             # Save to customer DB
             upsert_customer(record, sku=record.get('sku',''),
                             carrier='ELTA', tracking=tracking)
-            if catalog and record.get('sku'):
-                bump_sku_shipment(catalog, record['sku'])
+            if catalog:
+                bump_items_shipped(catalog, record)
 
             if generate_letters:
                 is_returning = ask_yes_no(
@@ -2770,7 +2982,7 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com",
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    print("ELTA Weblabeling & CRM — v6.00")
+    print("ELTA Weblabeling & CRM — v6.01")
     sync_dbs_from_github()
     try:
         run_mode = ask_run_mode()   # 'live' | 'historical' | 'from_db' | 'db_manager'

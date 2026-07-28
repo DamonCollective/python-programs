@@ -968,7 +968,7 @@ def open_db_manager():
 def ask_run_mode():
     """Returns 'live', 'historical', 'from_db', or 'db_manager'."""
     result = ['live']
-    root = tk.Tk(); root.title("ELTA 5.10 — Mode")
+    root = tk.Tk(); root.title("ELTA 6.00 — Mode")
     root.attributes('-topmost', True); root.resizable(False, False)
     tk.Label(root, text="Choose processing mode:",
              font=('Arial', 13, 'bold'), pady=16, padx=20).pack()
@@ -1029,7 +1029,7 @@ def ask_mode():
 
 def show_order_selection(records):
     selected = []
-    root = tk.Tk(); root.title("ELTA 5.10 — Order Selection")
+    root = tk.Tk(); root.title("ELTA 6.00 — Order Selection")
     root.attributes('-topmost', True); root.geometry("1150x580"); root.resizable(True, True)
 
     tk.Label(root, text="Select orders and choose carrier (click Carrier cell to toggle ELTA ↔ FedEx):",
@@ -1682,7 +1682,7 @@ class EltaShippingApp:
         self.shipping_data   = []
         self.current_index   = 0
 
-        self.root.title("ELTA 5.10 — Review & Edit")
+        self.root.title("ELTA 6.00 — Review & Edit")
         self.root.geometry("1020x800")
         try:
             self.root.state('zoomed')   # maximize on Windows
@@ -2679,6 +2679,13 @@ def process_all_records(shipping_records, driver, generate_letters=True, catalog
                 human_delay(1,2)
             tracking = print_shipping_label(driver, record)
 
+            # Was this customer already in the DB BEFORE this order? (must check
+            # before upsert_customer(), which saves/increments this order into the DB)
+            _db_pre = load_customer_db()
+            _key    = customer_db_key(record)
+            _in_db  = (_key and _key in _db_pre and
+                       _db_pre[_key].get("total_orders", 0) > 0)
+
             # Save to customer DB
             upsert_customer(record, sku=record.get('sku',''),
                             carrier='ELTA', tracking=tracking)
@@ -2686,10 +2693,6 @@ def process_all_records(shipping_records, driver, generate_letters=True, catalog
                 bump_sku_shipment(catalog, record['sku'])
 
             if generate_letters:
-                _db_pre      = load_customer_db()
-                _key         = customer_db_key(record)
-                _in_db       = (_key and _key in _db_pre and
-                                _db_pre[_key].get("total_orders", 0) > 0)
                 is_returning = ask_yes_no(
                     f"Is {record.get('full_name', 'this customer')} a RETURNING customer?\n\n"
                     f"(Yes → returning letter,  No → first-time letter)"
@@ -2767,7 +2770,7 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com",
 # ═══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    print("ELTA Weblabeling & CRM — v5.9")
+    print("ELTA Weblabeling & CRM — v6.00")
     sync_dbs_from_github()
     try:
         run_mode = ask_run_mode()   # 'live' | 'historical' | 'from_db' | 'db_manager'

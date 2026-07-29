@@ -1241,6 +1241,12 @@ def ask_items(catalog, etsy_title="", current_items=None, parent=None):
     qty_var = tk.StringVar(value="1")
     tk.Entry(qf, textvariable=qty_var, width=5, font=('Arial',9)).pack(side=tk.LEFT, padx=6)
 
+    # Optional comment appended to the SELECTED catalog item's description
+    # for this order only — the catalog entry's own name is never changed.
+    tk.Label(qf, text="Comment for next Add Selected (optional):", font=('Arial',9,'bold')).pack(side=tk.LEFT, padx=(16,0))
+    comment_var = tk.StringVar()
+    tk.Entry(qf, textvariable=comment_var, width=35, font=('Arial',9)).pack(side=tk.LEFT, padx=6)
+
     # New product form (saved permanently to the catalog)
     nf = ttk.LabelFrame(root, text="  Create new product (saved to catalog)  ", padding=8)
     nf.pack(fill=tk.X, padx=10, pady=4)
@@ -1330,11 +1336,14 @@ def ask_items(catalog, etsy_title="", current_items=None, parent=None):
         entry = catalog["skus"][sku]
         if etsy_title:
             link_title_to_sku(catalog, sku, etsy_title)
+        comment = comment_var.get().strip()
+        name = f"{entry.get('name','')} {comment}".strip() if comment else entry.get('name','')
         items.append({
-            'sku': sku, 'name': entry.get('name',''), 'qty': qty_var.get().strip() or '1',
+            'sku': sku, 'name': name, 'qty': qty_var.get().strip() or '1',
             'weight_kg': entry.get('weight_kg',''), 'value_eur': entry.get('value_eur',''),
             'is_custom': False,
         })
+        comment_var.set('')
         refresh_items()
 
     def create_new():

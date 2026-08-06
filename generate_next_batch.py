@@ -38,9 +38,18 @@ batch_items = pending[:BATCH_SIZE]
 batch_pids = [item['id'] for item in batch_items]
 
 # ── Determine next batch number from existing files on Desktop ─────────────
-n = 1
-while os.path.exists(rf'C:\Users\Damon\Desktop\descriptions_batch_{n:02d}.txt'):
-    n += 1
+# Use the HIGHEST existing batch number + 1, not the first gap — a gap can
+# appear when an old raw-draft file gets cleaned up after being superseded
+# by its fine-tuned "B" version, and reusing that number overwrites files
+# that look free but whose batch was already applied/uploaded.
+import re as _re
+existing = []
+desktop = r'C:\Users\Damon\Desktop'
+for fname in os.listdir(desktop):
+    m = _re.fullmatch(r'descriptions_batch_(\d{2})(?:[A-Z])?\.txt', fname)
+    if m:
+        existing.append(int(m.group(1)))
+n = (max(existing) + 1) if existing else 1
 batch_file = rf'C:\Users\Damon\Desktop\descriptions_batch_{n:02d}.txt'
 
 lines = []

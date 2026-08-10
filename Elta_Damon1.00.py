@@ -2777,9 +2777,11 @@ def fill_content_description(driver, record):
         wait_for_user("Please fill content description manually, then click Done.")
 
 RECEIPTS_DIR = "D:\\Downloads"
-CUSTOMS_TARIFF_CODE = "67049000"    # wigs/false-hair goods HS code — pad with extra
-                                     # trailing zeros by hand on the ELTA page if it
-                                     # asks for a longer code on a given item.
+CUSTOMS_TARIFF_CODE = "67041100"    # wigs of synthetic textile materials — matches
+                                     # Zonos' 6704.11.0000 (dotted form there, plain
+                                     # digits here). Confirmed as the correct heading
+                                     # 2026-08-10; keep this identical across ELTA and
+                                     # Zonos so both systems always declare the same code.
 CUSTOMS_LINE_NET_WEIGHT_KG = "0,2"  # fixed per-item customs weight; the box's real
                                      # gross weight is entered separately by hand.
 

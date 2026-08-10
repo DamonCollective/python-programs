@@ -1031,30 +1031,49 @@ def ask_run_mode():
     root.grab_set(); root.mainloop()
     return result[0]
 
-def ask_mode():
-    """Labels+Letters / Labels only / Letters only. Returns 'both','labels','letters'."""
-    result = ['both']
-    root = tk.Tk(); root.title("What to run?")
+def ask_what_to_run():
+    """Checklist: Labels / Thank-you Notes / Zonos prep.
+    Returns {'mode': 'both'|'labels'|'letters', 'zonos': bool}."""
+    result = {}
+    root = tk.Tk(); root.title("ELTA_Damon1.00 — What do you need?")
     root.attributes('-topmost', True); root.resizable(False, False)
-    tk.Label(root, text="What to process?", font=('Arial',12,'bold'),
-             pady=14, padx=16).pack()
-    bf = tk.Frame(root); bf.pack(pady=(4,16))
-    def pick(v): result[0]=v; root.destroy()
-    tk.Button(bf, text="Labels + Thank-you Letters", command=lambda:pick('both'),
-              bg='#2980b9', fg='white', font=('Arial',11,'bold'),
-              relief='flat', padx=14, pady=7, cursor='hand2').pack(fill='x',padx=12,pady=4)
-    tk.Button(bf, text="Labels Only", command=lambda:pick('labels'),
-              bg='#27ae60', fg='white', font=('Arial',11,'bold'),
-              relief='flat', padx=14, pady=7, cursor='hand2').pack(fill='x',padx=12,pady=4)
-    tk.Button(bf, text="Thank-you Letters Only", command=lambda:pick('letters'),
-              bg='#8e44ad', fg='white', font=('Arial',11,'bold'),
-              relief='flat', padx=14, pady=7, cursor='hand2').pack(fill='x',padx=12,pady=4)
+    tk.Label(root, text="What do you need for this run?", font=('Arial',12,'bold'),
+             pady=14, padx=20).pack()
+    labels_var  = tk.BooleanVar(value=True)
+    letters_var = tk.BooleanVar(value=True)
+    zonos_var   = tk.BooleanVar(value=False)
+    cf = tk.Frame(root); cf.pack(padx=20, pady=(0,4), anchor='w')
+    tk.Checkbutton(cf, text="Labels (ELTA shipping labels)", variable=labels_var,
+                   font=('Arial',11)).pack(anchor='w', pady=2)
+    tk.Checkbutton(cf, text="Thank-you Notes", variable=letters_var,
+                   font=('Arial',11)).pack(anchor='w', pady=2)
+    tk.Checkbutton(cf, text="Zonos prep (not built yet — will be skipped)", variable=zonos_var,
+                   font=('Arial',11)).pack(anchor='w', pady=2)
+    def go():
+        if not labels_var.get() and not letters_var.get():
+            messagebox.showwarning("Pick something", "Select at least Labels or Thank-you Notes.")
+            return
+        if labels_var.get() and letters_var.get(): m = 'both'
+        elif labels_var.get(): m = 'labels'
+        else: m = 'letters'
+        result['mode']  = m
+        result['zonos'] = zonos_var.get()
+        root.destroy()
+    tk.Button(root, text="Continue", command=go, bg='#2980b9', fg='white',
+              font=('Arial',11,'bold'), relief='flat', padx=16, pady=8,
+              cursor='hand2').pack(pady=(8,18))
     root.update_idletasks()
     w, h = root.winfo_reqwidth(), root.winfo_reqheight()
     sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
     root.geometry(f"+{(sw-w)//2}+{(sh-h)//2}")
     root.grab_set(); root.mainloop()
-    return result[0]
+    if not result:
+        raise SystemExit("Aborted.")
+    if result['zonos']:
+        messagebox.showinfo("Zonos prep",
+            "Zonos automation isn't built yet — this run will skip it.\n"
+            "Prepare Zonos separately as you're doing now.")
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -3195,7 +3214,7 @@ if __name__ == "__main__":
 
             records = [_build_record(c) for c in customers]
 
-            mode = ask_mode()
+            mode = ask_what_to_run()['mode']
             root = tk.Tk()
             app  = EltaShippingApp(root, filepath='', mode=mode,
                                    records=records, historical=False, from_db=True)
@@ -3239,7 +3258,7 @@ if __name__ == "__main__":
                 root.mainloop()
 
             else:
-                mode = ask_mode()
+                mode = ask_what_to_run()['mode']
                 if mode == 'letters':
                     for r in selected:
                         try: generate_thank_you(r)

@@ -2549,7 +2549,11 @@ def click_checkbox_by_label(driver, label_text):
             f"/preceding::input[@type='checkbox'][1] | "
             f"//label[contains(normalize-space(),'{label_text}')]"
             f"/following::input[@type='checkbox'][1] | "
-            f"//input[@type='checkbox' and @id=//label[contains(normalize-space(),'{label_text}')]/@for]")
+            f"//label[contains(normalize-space(),'{label_text}')]"
+            f"//input[@type='checkbox'] | "
+            f"//input[@type='checkbox' and @id=//label[contains(normalize-space(),'{label_text}')]/@for] | "
+            f"//*[contains(normalize-space(text()),'{label_text}')]"
+            f"/parent::*//input[@type='checkbox']")
         visible = [el for el in candidates if el.is_displayed() and el.is_enabled()]
         if not visible: return False
         cb = visible[0]
@@ -2647,7 +2651,9 @@ def fill_receiver_form(driver, receiver_data, record):
             print(f"⚠ Could not fill {fid} — enter '{value}' manually.")
         human_delay(0.2,0.4)
     if not click_checkbox_by_label(driver, "Πώληση Αγαθών"):
-        print("⚠ Could not tick 'Πώληση Αγαθών' (Sale of Goods) — tick manually.")
+        wait_for_user(
+            "⚠ Could not auto-tick 'Πώληση Αγαθών' (Sale of Goods).\n\n"
+            "Please tick it by hand in the browser, then click Done.")
 
 def fill_content_description(driver, record, parsed_items=None):
     if not needs_customs(record): return
@@ -2966,7 +2972,33 @@ def get_and_parse_receipt(record):
 
     return items, invoice_number
 
-def fill_customs_declaration_lines(driver, items, invoice_number):
+def _try_add_customs_line(driver):
+    """Best-effort click of an 'add another customs declaration line' control,
+    for orders with more items than the form shows by default. The real
+    button/id has not been confirmed against the live page yet (2026-08-12
+    live run only had 1-2 lines visible without needing this) — this tries a
+    few common patterns and silently no-ops if none match, so a future
+    confirmed selector can just replace this list."""
+    xpaths = [
+        "//a[contains(@class,'Add') and contains(@class,'Customs')]",
+        "//button[contains(@class,'Add') and contains(@class,'Customs')]",
+        "//a[contains(text(),'Προσθήκη') and (contains(text(),'γραμμ') or contains(text(),'είδο'))]",
+        "//button[contains(text(),'Προσθήκη') and (contains(text(),'γραμμ') or contains(text(),'είδο'))]",
+        "//a[@id[contains(.,'AddCustoms')] or @id[contains(.,'AddLine')] or @id[contains(.,'AddItem')]]",
+        "//button[@id[contains(.,'AddCustoms')] or @id[contains(.,'AddLine')] or @id[contains(.,'AddItem')]]",
+    ]
+    for xp in xpaths:
+        try:
+            els = [e for e in driver.find_elements(By.XPATH, xp) if e.is_displayed() and e.is_enabled()]
+            if els:
+                driver.execute_script("arguments[0].click();", els[0])
+                human_delay(0.4, 0.8)
+                return True
+        except Exception:
+            continue
+    return False
+
+def fill_customs_declaration_lines(driver, items, invoice_number, record=None):
     try:
         WebDriverWait(driver,15).until(
             EC.visibility_of_element_located((By.ID,"CustomsDeclarationDetailedDescriptionOfContents1")))
@@ -2976,22 +3008,63 @@ def fill_customs_declaration_lines(driver, items, invoice_number):
     if not items:
         print("⚠ No items parsed from receipt — fill customs lines by hand.")
 
+    # Fallback net weight for items with no Zonos-sourced weight: 70% of the
+    # order's packed gross weight (record['weight_kg'], entered by hand at
+    # Review), split evenly across however many items are missing one —
+    # replaces the old flat 0,2kg guess, which was never representative of
+    # the real item weight.
+    missing_weight_items = [it for it in items if not it.get('weight_kg')]
+    fallback_each_kg = None
+    if missing_weight_items and record:
+        gross_kg = _parse_num(record.get('weight_kg', ''), 0.0)
+        if gross_kg > 0:
+            fallback_each_kg = (gross_kg * 0.7) / len(missing_weight_items)
+
+    failed_lines = []
     for i, item in enumerate(items, start=1):
+        if i > 1:
+            try:
+                driver.find_element(By.ID, f"CustomsDeclarationDetailedDescriptionOfContents{i}")
+            except Exception:
+                if _try_add_customs_line(driver):
+                    print(f"✓ Clicked an 'add line' control for customs line {i}")
+                else:
+                    print(f"⚠ Customs line {i}'s fields aren't on the page yet and no "
+                          f"'add line' control was found — may need adding by hand.")
+
         short_desc = _short_customs_description(item['description'])
-        net_weight = (_fmt_weight_kg(item['weight_kg']) if 'weight_kg' in item
-                      else CUSTOMS_LINE_NET_WEIGHT_KG)
-        fill_by_id(driver, f"CustomsDeclarationDetailedDescriptionOfContents{i}", short_desc)
-        fill_by_id(driver, f"CustomsDeclarationQuantity{i}",                      item['qty'])
-        fill_by_id(driver, f"CustomsDeclarationNetWeight{i}",                     net_weight)
-        fill_by_id(driver, f"CustomsDeclarationValue{i}",                         item['value'])
-        fill_by_id(driver, f"CustomsDeclarationHSTarifNumber{i}",                 CUSTOMS_TARIFF_CODE)
-        fill_by_id(driver, f"CustomsDeclarationCounryOfOrigionOfGoods{i}",        "GR")
+        if item.get('weight_kg'):
+            net_weight = _fmt_weight_kg(item['weight_kg'])
+        elif fallback_each_kg is not None:
+            net_weight = _fmt_weight_kg(fallback_each_kg)
+            print(f"⚠ No Zonos weight for item {i} — defaulted net weight to "
+                  f"70% of gross ÷ {len(missing_weight_items)} missing item(s) = {net_weight} kg")
+        else:
+            net_weight = CUSTOMS_LINE_NET_WEIGHT_KG
+            print(f"⚠ No Zonos weight and no gross weight available for item {i} — "
+                  f"used the {CUSTOMS_LINE_NET_WEIGHT_KG} kg fallback constant.")
+
+        ok = True
+        ok = fill_by_id(driver, f"CustomsDeclarationDetailedDescriptionOfContents{i}", short_desc) and ok
+        ok = fill_by_id(driver, f"CustomsDeclarationQuantity{i}",                      item['qty']) and ok
+        ok = fill_by_id(driver, f"CustomsDeclarationNetWeight{i}",                     net_weight) and ok
+        ok = fill_by_id(driver, f"CustomsDeclarationValue{i}",                         item['value']) and ok
+        ok = fill_by_id(driver, f"CustomsDeclarationHSTarifNumber{i}",                 CUSTOMS_TARIFF_CODE) and ok
+        ok = fill_by_id(driver, f"CustomsDeclarationCounryOfOrigionOfGoods{i}",        "GR") and ok
+        if not ok:
+            failed_lines.append(i)
 
     if invoice_number:
         if not click_checkbox_by_label(driver, "Αριθμοί τιμολογίου"):
             print("⚠ Could not tick 'Αριθμοί τιμολογίου' checkbox — tick manually.")
         if not fill_visible_field(driver, "Αριθμοί τιμολογίου", invoice_number):
             print(f"⚠ Could not fill invoice number field — enter '{invoice_number}' manually.")
+
+    if failed_lines:
+        wait_for_user(
+            f"⚠ Customs line(s) {', '.join(map(str, failed_lines))} of {len(items)} "
+            f"didn't fully fill — the form may not show that many lines by default.\n\n"
+            f"Please add/fill the missing line(s) by hand, then click Done.")
 
 def rename_latest_pdf(last_name, first_name, min_time=None):
     try:
@@ -3090,7 +3163,7 @@ def process_all_records(shipping_records, driver, generate_letters=True, catalog
             find_and_click_next_button(driver, step=3)
             human_delay(1,2)
             if needs_customs(record):
-                fill_customs_declaration_lines(driver, parsed_items, invoice_number)
+                fill_customs_declaration_lines(driver, parsed_items, invoice_number, record)
                 pause_for_next(
                     "Check/edit the customs declaration (description, value, "
                     "invoice number) against the receipt, then press Next.")

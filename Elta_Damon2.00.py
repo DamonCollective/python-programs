@@ -2563,6 +2563,12 @@ CUSTOMS_LINE_NET_WEIGHT_KG = "0,2"  # fallback per-item customs weight, used onl
                                      # no Zonos confirmation PDF weight was found for
                                      # that line; the box's real gross weight is
                                      # entered separately by hand.
+CUSTOMS_DESCRIPTION_MAX_LEN = 24    # ELTA's live validator rejected a 25-char customs
+                                     # description with "exceeds the maximum length of
+                                     # '24'" (2026-08-18 real upload) — Instructions.xls
+                                     # documents this field as 50 chars, but the actual
+                                     # bulk-import validator enforces 24. Trust the live
+                                     # limit over the doc.
 
 _GREEK_RE = re.compile(r'[\u0370-\u03FF\u1F00-\u1FFF]')
 
@@ -2600,8 +2606,8 @@ _WORD_ABBREVIATIONS = {
     "WIG":       "WIG",
     "BEARD":     "BEARD",
     "QUEUE":     "QUEUE",
-    "MUSTACHE":  "MUSTCHE",
-    "MOUSTACHE": "MUSTCHE",
+    "MUSTACHE":  "MSTCH",
+    "MOUSTACHE": "MSTCH",
 }
 
 def _short_customs_description(desc):
@@ -2936,7 +2942,7 @@ def build_csv_row(record, service_pref, items, invoice_number):
 
     customs_cols = []
     for item in items[:MAX_CUSTOMS_LINES]:
-        desc = _short_customs_description(item.get('description', ''))[:50]
+        desc = _short_customs_description(item.get('description', ''))[:CUSTOMS_DESCRIPTION_MAX_LEN]
         if item.get('weight_kg'):
             net_weight = _fmt_weight_kg(item['weight_kg'])
         elif fallback_each_kg is not None:
@@ -2981,7 +2987,13 @@ def build_csv_row(record, service_pref, items, invoice_number):
         _csv_int(record.get("length_cm",""), 0),                  # X  Length (in cm)
         _csv_int(record.get("width_cm",""), 0),                   # Y  Width (in cm)
         _csv_int(record.get("height_cm",""), 0),                  # Z  Height (in cm)
-        _csv_int(record.get("customs_qty","1"), 1),               # AA Quantity
+        "",                                                     # AA Quantity — package count, optional,
+                                                                   # "Standard Value (1)" per spec; leave blank
+                                                                   # and let ELTA default it (2026-08-18: a real
+                                                                   # upload was rejected with "must not have a
+                                                                   # value (Quantity)" when this held the item
+                                                                   # count instead — this field is package count,
+                                                                   # not item count, which is AL/AR/AX/BD/BJ below)
         "0",                                                     # AB COD (In €)
         "0",                                                     # AC Insured Value (In €)
         "0",                                                     # AD Gift

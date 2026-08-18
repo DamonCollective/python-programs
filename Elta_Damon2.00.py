@@ -2651,6 +2651,26 @@ def find_zonos_candidates(last_name):
             matches.append(os.path.join(RECEIPTS_DIR, fname))
     return matches
 
+# Product-code → clean English description, built up from real receipts as
+# new codes are seen (the MyData/eskap 'Κωδικός' column, e.g. "AG-7467383" —
+# not this project's own WIG-NNN catalog SKUs). Needed because a receipt's
+# 'Περιγραφή' (description) cell can't be reliably split back into per-item
+# text: when ELTA's PDF wraps a description onto an extra line, pdfplumber's
+# linear text-extraction order pushes that continuation word to a different
+# position in the stream than the item's own numbers (caught 2026-08-18 on a
+# real order — "MOUSTACHE" landed after the NEXT item's Τεμάχια/numbers line,
+# not after its own description). The Κωδικός/Ποσότ./Αξία table columns never
+# wrap onto an extra line and stay reliably aligned one-segment-per-item, so
+# those drive qty/value/item-count; description is looked up by code instead
+# of parsed from the wrapped cell text. Add new (code → description) pairs
+# here as new product types show up — parse_receipt_pdf prints a warning and
+# falls back to a placeholder for any code not yet in this table.
+_RECEIPT_CODE_DESCRIPTIONS = {
+    'AG-7467383': 'SYNTHETIC FIBER COSTUME WIG',
+    'AG-4649673': 'SYNTHETIC FIBER COSTUME MOUSTACHE',
+    'AG-7469284': 'SYNTHETIC FIBER COSTUME BEARD',
+}
+
 def parse_receipt_pdf(path):
     """Extract invoice number + item lines (English-only desc, qty, value) from
     a MyData retail-sale receipt PDF."""
@@ -2680,32 +2700,51 @@ def parse_receipt_pdf(path):
                 for idx, h in enumerate(header):
                     if h == label: return idx
                 return None
-            idx_desc, idx_qty, idx_val = col('Περιγραφή'), col('Ποσότ.'), col('Αξία')
+            idx_code, idx_qty, idx_val = col('Κωδικός'), col('Ποσότ.'), col('Αξία')
             for row in item_table[1:]:
-                if idx_desc is None or idx_desc >= len(row):
+                if idx_code is None or idx_code >= len(row) or not row[idx_code]:
                     continue
-                desc = _english_only(row[idx_desc])
-                if not desc:
-                    continue
-                qty = _fmt_num(row[idx_qty]) if idx_qty is not None and idx_qty < len(row) else '1'
-                val = _fmt_num(row[idx_val]) if idx_val is not None and idx_val < len(row) else '0'
-                result['items'].append({'description': desc, 'qty': qty, 'value': val})
+                # A single table row can hold multiple receipt lines that
+                # pdfplumber visually merged (same row-height span) — but the
+                # code/qty/value cells still hold one '\n'-joined segment per
+                # real item, in order, so splitting them recovers each item
+                # correctly regardless of how the description cell wrapped.
+                codes = row[idx_code].split('\n')
+                qtys  = (row[idx_qty] or '').split('\n') if idx_qty is not None and idx_qty < len(row) else []
+                vals  = (row[idx_val] or '').split('\n') if idx_val is not None and idx_val < len(row) else []
+                for i, code in enumerate(codes):
+                    code = code.strip()
+                    if not code:
+                        continue
+                    desc = _RECEIPT_CODE_DESCRIPTIONS.get(code)
+                    if not desc:
+                        print(f"⚠ Unknown product code '{code}' in receipt — add it to "
+                              f"_RECEIPT_CODE_DESCRIPTIONS; using a placeholder description, "
+                              f"check it by hand before uploading.")
+                        desc = f"ITEM {code}"
+                    qty = _fmt_num(qtys[i]) if i < len(qtys) else '1'
+                    val = _fmt_num(vals[i]) if i < len(vals) else '0'
+                    result['items'].append({'description': desc, 'qty': qty, 'value': val})
     return result
 
 # Matches one item card on the Zonos Prepay confirmation PDF, e.g.:
-#   SYNTHETIC FIBER COSTUME WIG
+#   SYNTHETIC FIBER COSTUME WIG          <- Zonos's own title, case varies
 #   Customs description:
 #   Synthetic fiber costume wig
 #   Greece • 6704.11.0000
 #   Weight: 0.5 g
 #   (1 x 0.5 g)
-# The all-caps title line is the "exact product description"; weight is in
-# grams. Confirmed against real Zonos PDFs (CLARKE, POU) 2026-08-11.
+# Anchored on the literal "Customs description:" marker rather than the
+# title line above it: confirmed 2026-08-18 that Zonos renders that title
+# inconsistently — ALL CAPS for some orders, sentence case for others, even
+# with the identical entered text and HS code — so a regex requiring an
+# all-caps title (the original 2026-08-11 assumption) silently matched zero
+# items on 3 of 5 real orders in one batch. The "Customs description:" line
+# right below is reliably present and holds the same text either way.
 _ZONOS_ITEM_RE = re.compile(
-    r'^([A-Z][A-Z0-9 /\'\-]{2,60})\n'
     r'Customs description:\n'
-    r'.*?\n'          # customs description line
-    r'.*?\n'          # "Country • HS code" line
+    r'(.+?)\n'          # customs description line — the real per-item text
+    r'.*?•\s*[\d.]+\n'  # "Country • HS code" line
     r'Weight:\s*([\d.,]+)\s*g',
     re.MULTILINE)
 

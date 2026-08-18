@@ -2600,14 +2600,14 @@ def _fmt_weight_kg(kg_value):
 # words are kept as-is (uppercased).
 _WORD_ABBREVIATIONS = {
     "SYNTHETIC": "SYNTH",
-    "FIBER":     "FIBER",
-    "FIBRE":     "FIBER",
-    "COSTUME":   "CSTME",
+    "FIBER":     "FIBR",
+    "FIBRE":     "FIBR",
+    "COSTUME":   "COSTME",
     "WIG":       "WIG",
     "BEARD":     "BEARD",
     "QUEUE":     "QUEUE",
-    "MUSTACHE":  "MSTCH",
-    "MOUSTACHE": "MSTCH",
+    "MUSTACHE":  "MUSTCH",
+    "MOUSTACHE": "MUSTCH",
 }
 
 def _short_customs_description(desc):

@@ -4,6 +4,12 @@ Features:
   - Shipping service type per run: all LL (854 Letter LL), all CP (802 Parcel
     Interconnect Premium), or Mix (pause per record so the type is picked by
     hand in the ELTA page, then press Next to continue)
+  - Persistent Firefox profile (~/Documents/ELTA_NEW_PROGRAM/firefox_profile)
+    keeps the ELTA login session between runs — CAPTCHA is skipped whenever
+    the session is still valid
+  - Startup cleanup of stray Firefox/geckodriver processes left over from a
+    crashed or interrupted earlier run (only automation-launched ones, never
+    a Firefox window opened normally)
   - Product catalog with unique SKUs (WIG-001, WIG-002 …)
   - Auto-SKU resolution: fuzzy title match + confirm dialog (same item / new item)
   - Auto-save dims/weight/customs value to catalog per SKU
@@ -52,6 +58,7 @@ from odf.text import P, Span
 OUTPUT_DIR       = os.path.expanduser("~/Documents/ELTA_NEW_PROGRAM")
 CUSTOMER_DB_PATH = os.path.join(OUTPUT_DIR, "customer_db.json")
 CATALOG_PATH     = os.path.join(OUTPUT_DIR, "product_catalog.json")
+FIREFOX_PROFILE_DIR = os.path.join(OUTPUT_DIR, "firefox_profile")
 
 SENDER = {
     "name":    "KONSTANTINOS PAPAPANAGIOTOU",
@@ -605,6 +612,29 @@ def strip_accents(text):
     text = text.replace('Ł', 'L').replace('ł', 'l')
     nfkd = unicodedata.normalize('NFKD', text)
     return ''.join(c for c in nfkd if not unicodedata.combining(c))
+
+def kill_stray_firefox_processes():
+    """Kill leftover Firefox/geckodriver processes from earlier automated runs
+    that never got a driver.quit() (crash, closed window, etc.) -- identified by
+    the -marionette flag Selenium adds, or the geckodriver.exe process itself.
+    A Firefox window the user opened normally (no -marionette flag) is left alone."""
+    import platform, subprocess
+    try:
+        if platform.system() == "Windows":
+            ps_cmd = (
+                "Get-CimInstance Win32_Process -Filter "
+                "\"Name='firefox.exe' or Name='geckodriver.exe'\" "
+                "| Where-Object { $_.Name -eq 'geckodriver.exe' -or $_.CommandLine -match '-marionette' } "
+                "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+            )
+            subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd],
+                           capture_output=True, timeout=15)
+        else:
+            subprocess.run(["pkill", "-f", "geckodriver"], capture_output=True)
+            subprocess.run(["pkill", "-f", "firefox.*-marionette"], capture_output=True)
+        print("Cleared any stray automated Firefox/geckodriver processes.")
+    except Exception as e:
+        print(f"Stray process cleanup skipped: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2996,10 +3026,14 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com",
                         generate_letters=True, catalog=None, service_mode="LL"):
     if not shipping_records: return
     import platform
+    kill_stray_firefox_processes()
     options = webdriver.FirefoxOptions()
     if platform.system()=="Linux":
         options.binary_location="/snap/firefox/current/usr/lib/firefox/firefox"
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(FIREFOX_PROFILE_DIR, exist_ok=True)
+    options.add_argument("-profile")
+    options.add_argument(FIREFOX_PROFILE_DIR)
     options.set_preference("browser.download.folderList", 2)
     options.set_preference("browser.download.dir", OUTPUT_DIR)
     options.set_preference("browser.download.useDownloadDir", True)
@@ -3010,16 +3044,31 @@ def process_elta_labels(shipping_records, sender_email="math4econ@gmail.com",
     driver = webdriver.Firefox(options=options)
     try:
         driver.get("https://weblabeling.elta.gr/el-GR/Account/NCLogin")
-        WebDriverWait(driver,10).until(lambda d: "NCLogin" in d.current_url)
-        email_field = WebDriverWait(driver,10).until(
-            EC.presence_of_element_located((By.ID,"Email")))
-        human_delay(0.5,1.5); email_field.clear()
-        for char in sender_email: email_field.send_keys(char); human_delay(0.05,0.15)
-        print("⚠ Solve CAPTCHA in browser then proceed.")
-        try:
-            WebDriverWait(driver,180).until(lambda d: "NCLogin" not in d.current_url)
-        except Exception:
-            wait_for_user("Solve CAPTCHA, click Next in browser, then Done here.")
+        human_delay(1, 2)
+        if "NCLogin" in driver.current_url:
+            email_field = WebDriverWait(driver,10).until(
+                EC.presence_of_element_located((By.ID,"Email")))
+            human_delay(0.5,1.5); email_field.clear()
+            for char in sender_email: email_field.send_keys(char); human_delay(0.05,0.15)
+            print("⚠ Solve CAPTCHA in browser then proceed.")
+            try:
+                WebDriverWait(driver,180).until(lambda d: "NCLogin" not in d.current_url)
+            except Exception:
+                wait_for_user("Solve CAPTCHA, click Next in browser, then Done here.")
+        else:
+            print("✓ Already logged in (persistent profile) — CAPTCHA skipped.")
+            # A revisit may land on a dashboard/home page instead of the
+            # create-shipment screen (unlike a fresh login, which redirects
+            # straight there) — click "Νέα αποστολή" if it's present.
+            try:
+                btn = WebDriverWait(driver, 6).until(EC.element_to_be_clickable((By.XPATH,
+                    "//a[contains(text(),'Νέα αποστολή') or contains(text(),'Δημιουργ')]"
+                    "|//button[contains(text(),'Νέα αποστολή') or contains(text(),'Δημιουργ')]")))
+                human_delay(0.5, 1.5); btn.click()
+                WebDriverWait(driver, 15).until(lambda d: len(d.find_elements(
+                    By.XPATH, "//div[contains(@class,'load')]")) == 0)
+            except Exception:
+                pass
 
         select_country_and_service(driver, elta_country(shipping_records[0]), service_mode)
         find_and_click_next_button(driver, step=1)

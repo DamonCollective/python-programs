@@ -857,6 +857,29 @@ def wait_for_user(message):
     root.geometry(f"+{(sw-w)//2}+{(sh-h)//2}")
     root.grab_set(); root.mainloop()
 
+def click_with_retry(driver, by, selector, description, retries=2, delay=1.0, timeout=10):
+    """Standard resilience pattern (added 2026-08-19, see
+    feedback_automation_retry_pattern in project memory): never let a
+    single click crash the run. Retry a couple of times first (covers
+    transient overlays/toasts like the one that blocked Zonos's
+    'Add another item' button on the Stephen Duff order) — if it still
+    won't go through, pause and let the user fix it by hand in the
+    browser, then try once more before giving up to the caller."""
+    last_err = None
+    for _ in range(retries):
+        try:
+            el = WebDriverWait(driver, timeout).until(EC.element_to_be_clickable((by, selector)))
+            el.click()
+            return el
+        except Exception as e:
+            last_err = e
+            time.sleep(delay)
+    wait_for_user(f"Problem: {description}\n{last_err}\n\n"
+                  f"Fix manually in the browser, then click Done to continue.")
+    el = WebDriverWait(driver, timeout).until(EC.element_to_be_clickable((by, selector)))
+    el.click()
+    return el
+
 def ask_yes_no(question):
     result = [False]
     root = tk.Tk(); root.title("Question")
@@ -3030,7 +3053,8 @@ def _zonos_select_combo(driver, button_testid, search_text):
     specifically (their saved defaults were already correct both times this
     was tested live) — confirmed working for the per-item Made-in field,
     which uses the identical component pattern."""
-    driver.find_element(By.CSS_SELECTOR, f'[data-testid="{button_testid}"]').click()
+    click_with_retry(driver, By.CSS_SELECTOR, f'[data-testid="{button_testid}"]',
+                      f"Zonos: click combobox '{button_testid}'")
     time.sleep(0.4)
     active = driver.switch_to.active_element
     active.clear()
@@ -3058,8 +3082,10 @@ def zonos_ensure_shipment_setup(driver):
         _zonos_select_combo(driver, "ship-to-selector", "United States")
     std_btn = driver.find_element(By.XPATH, "//button[normalize-space()='Standard package']")
     if std_btn.get_attribute('aria-pressed') != 'true':
-        std_btn.click()
-    driver.find_element(By.CSS_SELECTOR, '[data-testid="ship-setup-continue"]').click()
+        click_with_retry(driver, By.XPATH, "//button[normalize-space()='Standard package']",
+                          "Zonos: click 'Standard package'")
+    click_with_retry(driver, By.CSS_SELECTOR, '[data-testid="ship-setup-continue"]',
+                      "Zonos: click ship-setup Continue")
     WebDriverWait(driver, 10).until(
         EC.presence_of_element_located((By.CSS_SELECTOR, '[data-testid="step-add-items"]')))
 
@@ -3067,7 +3093,8 @@ def zonos_add_item(driver, description, unit_value_eur, qty, weight_g, is_first_
     """Fill one item card and Save. `is_first_item` controls whether
     '+ Add another item' needs clicking first to open a fresh form."""
     if not is_first_item:
-        driver.find_element(By.CSS_SELECTOR, '[data-testid="add-another-item-button"]').click()
+        click_with_retry(driver, By.CSS_SELECTOR, '[data-testid="add-another-item-button"]',
+                          "Zonos: click 'Add another item'")
         time.sleep(0.5)
 
     # The AI auto-fill toggle defaults ON for every fresh item form — confirmed
@@ -3090,7 +3117,8 @@ def zonos_add_item(driver, description, unit_value_eur, qty, weight_g, is_first_
     # Made in — react-select combobox: a real click opens it (a synthetic JS
     # click does not — confirmed live), typing filters it, then click the
     # single filtered option.
-    driver.find_element(By.CSS_SELECTOR, '[data-testid="amino--made-in--"]').click()
+    click_with_retry(driver, By.CSS_SELECTOR, '[data-testid="amino--made-in--"]',
+                      "Zonos: click Made-in field")
     time.sleep(0.4)
     made_in_input = driver.switch_to.active_element
     made_in_input.send_keys(ZONOS_MADE_IN)
@@ -3112,21 +3140,23 @@ def zonos_add_item(driver, description, unit_value_eur, qty, weight_g, is_first_
     weight_el = inputs[-1]
     weight_el.clear(); weight_el.send_keys(str(int(round(weight_g))))
 
-    driver.find_element(By.CSS_SELECTOR, '[data-testid="save-item-button"]').click()
+    click_with_retry(driver, By.CSS_SELECTOR, '[data-testid="save-item-button"]',
+                      "Zonos: click Save item")
     WebDriverWait(driver, 10).until(
         EC.presence_of_element_located((By.CSS_SELECTOR, '[data-testid="add-another-item-button"]')))
 
 def zonos_finish_items_and_reach_payment(driver):
     """Tick attestation, check compliance, calculate duties, continue —
     stops right at the payment step, never touches the Pay button."""
-    driver.find_element(By.CSS_SELECTOR, '[data-testid="confirm-information-checkbox"]').click()
+    click_with_retry(driver, By.CSS_SELECTOR, '[data-testid="confirm-information-checkbox"]',
+                      "Zonos: click attestation checkbox")
     time.sleep(0.3)
-    driver.find_element(By.CSS_SELECTOR, '[data-testid="calculate-duties-button"]').click()
-    WebDriverWait(driver, 10).until(
-        EC.element_to_be_clickable(
-            (By.CSS_SELECTOR, '[data-testid="clarify-success-continue-button"]'))).click()
-    WebDriverWait(driver, 15).until(
-        EC.element_to_be_clickable((By.CSS_SELECTOR, '[data-testid="amino--continue"]'))).click()
+    click_with_retry(driver, By.CSS_SELECTOR, '[data-testid="calculate-duties-button"]',
+                      "Zonos: click Calculate duties")
+    click_with_retry(driver, By.CSS_SELECTOR, '[data-testid="clarify-success-continue-button"]',
+                      "Zonos: click Continue after duties", timeout=10)
+    click_with_retry(driver, By.CSS_SELECTOR, '[data-testid="amino--continue"]',
+                      "Zonos: click final Continue to payment", timeout=15)
     WebDriverWait(driver, 10).until(
         EC.presence_of_element_located((By.CSS_SELECTOR, '[data-testid="step-review-pay"]')))
 
